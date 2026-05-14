@@ -11,6 +11,7 @@ type PageState = 'loading' | 'ready' | 'error' | 'done';
 interface WorkerInfo {
   workerName: string;
   organizationName: string;
+  photoUrl?: string;
 }
 
 export default function VerificationPage() {
@@ -62,6 +63,7 @@ export default function VerificationPage() {
         setWorkerInfo({
           workerName: data.workerName ?? 'Employee',
           organizationName: data.organizationName ?? 'Your Organisation',
+          photoUrl: data.photoUrl,
         });
         setPageState('ready');
       } catch (err: unknown) {
@@ -242,7 +244,11 @@ export default function VerificationPage() {
 
       {/* LivenessScanner fills the screen */}
       {token && (
-        <LivenessScanner token={token} onComplete={handleComplete} />
+        <LivenessScanner 
+          token={token} 
+          adminPhotoUrl={workerInfo?.photoUrl}
+          onComplete={handleComplete} 
+        />
       )}
     </div>
   );

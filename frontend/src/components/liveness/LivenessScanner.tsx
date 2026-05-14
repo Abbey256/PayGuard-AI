@@ -13,6 +13,7 @@ import {
   SmileState,
 } from './challengeEngine';
 import { computeTrustScore } from './trustScore';
+import * as faceapi from 'face-api.js';
 
 export interface VerificationResult {
   verdict: 'verified' | 'flagged';
@@ -77,7 +78,7 @@ const speak = (text: string, onEnd?: () => void) => {
 
 type Stage = 'tap_to_begin' | 'initializing' | 'positioning' | 'blink' | 'headTurn' | 'smile' | 'completing' | 'finished' | 'failed';
 
-export function LivenessScanner({ token, onComplete }: { token: string; onComplete: (res: VerificationResult) => void }) {
+export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: string; adminPhotoUrl?: string; onComplete: (res: VerificationResult) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const faceMeshRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -94,6 +95,8 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
   // Tracking challenges
   const challengesPassed = useRef(0);
   const positioningStartMs = useRef<number | null>(null);
+  const faceApiLoaded = useRef(false);
+  
   
   const blinkState = useRef<BlinkState>({ eyeClosed: false, blinkCount: 0 });
   const headTurnState = useRef<HeadTurnState>({ leftDetected: false, passed: false });
@@ -112,7 +115,7 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
     });
   }, []);
 
-  const handleTapToBegin = () => {
+    const handleTapToBegin = () => {
     if (stage !== 'tap_to_begin') return;
     
     // Unlock audio context by speaking an empty string during the user gesture
@@ -124,6 +127,18 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
     stageRef.current = 'initializing';
     setFeedback('Starting camera and AI...');
     initCameraAndAI();
+
+    // Load Face-API models in the background for final face match
+    if (adminPhotoUrl) {
+      const weightsUrl = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+      Promise.all([
+        faceapi.nets.ssdMobilenetv1.loadFromUri(weightsUrl),
+        faceapi.nets.faceLandmark68Net.loadFromUri(weightsUrl),
+        faceapi.nets.faceRecognitionNet.loadFromUri(weightsUrl)
+      ]).then(() => {
+        faceApiLoaded.current = true;
+      }).catch(err => console.error("Face-API models failed to load", err));
+    }
   };
 
   const captureSnapshot = (): string | null => {
@@ -155,6 +170,40 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
       staticFaceDetected: false, // For simplicity in this rewrite
     });
 
+    let finalVerdict = result.verdict;
+    let finalTrustScore = result.trustScore;
+
+    // --- REAL FACE MATCHING (Frontend) ---
+    if (snapshotBase64 && adminPhotoUrl && faceApiLoaded.current) {
+      setFeedback('Comparing face with database...');
+      try {
+        const snapshotImg = await faceapi.fetchImage(snapshotBase64);
+        
+        const adminImg = new Image();
+        adminImg.crossOrigin = 'anonymous';
+        adminImg.src = adminPhotoUrl;
+        await new Promise((resolve, reject) => {
+          adminImg.onload = resolve;
+          adminImg.onerror = reject;
+        });
+
+        const snapshotDetection = await faceapi.detectSingleFace(snapshotImg).withFaceLandmarks().withFaceDescriptor();
+        const adminDetection = await faceapi.detectSingleFace(adminImg).withFaceLandmarks().withFaceDescriptor();
+
+        if (snapshotDetection && adminDetection) {
+          const distance = faceapi.euclideanDistance(snapshotDetection.descriptor, adminDetection.descriptor);
+          const matchConfidence = Math.max(0, 100 - (distance * 100)); // Rough distance to percentage
+          
+          if (distance > 0.6) {
+            finalVerdict = 'flagged';
+          }
+          finalTrustScore = Math.round(matchConfidence);
+        }
+      } catch (err) {
+        console.error("Face match failed natively", err);
+      }
+    }
+
     try {
       let apiUrl = import.meta.env.VITE_API_URL || '';
       if (!apiUrl || apiUrl.startsWith('/')) {
@@ -166,14 +215,14 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
 
       const payload = {
         token,
-        trustScore: result.trustScore,
-        verdict: result.verdict,
+        trustScore: finalTrustScore,
+        verdict: finalVerdict,
         livenessData: {
           blinkDetected: passedCount >= 1,
           headTurnDetected: passedCount >= 2,
           smileDetected: passedCount >= 3,
           challengesPassed: passedCount,
-          snapshot: snapshotBase64 // Sent to backend for face matching
+          snapshot: snapshotBase64 // Sent to backend for audit logging
         }
       };
 
@@ -186,18 +235,18 @@ export function LivenessScanner({ token, onComplete }: { token: string; onComple
       console.error('Failed to submit verification', err);
     }
 
-    setTrustScore(result.trustScore);
-    const finalStage = result.verdict === 'verified' ? 'finished' : 'failed';
+    setTrustScore(finalTrustScore);
+    const finalStage = finalVerdict === 'verified' ? 'finished' : 'failed';
     setStage(finalStage);
     stageRef.current = finalStage;
     
-    if (result.verdict === 'verified') {
+    if (finalVerdict === 'verified') {
       speak('Verification successful. Your salary will be processed.');
     } else {
       speak('Verification unsuccessful. Please contact HR.');
     }
 
-    onComplete(result);
+    onComplete({ verdict: finalVerdict, trustScore: finalTrustScore });
   };
 
   const initCameraAndAI = async () => {

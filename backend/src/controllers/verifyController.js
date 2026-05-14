@@ -7,7 +7,6 @@
  */
 
 import { supabase } from "../services/supabaseClient.js";
-import { compareFaces } from "../services/faceMatchService.js";
 
 /**
  * GET /api/verify/:token
@@ -37,6 +36,7 @@ export async function validateToken(req, res, next) {
         staff (
           first_name,
           last_name,
+          photo_url,
           organizations (
             name
           )
@@ -63,8 +63,9 @@ export async function validateToken(req, res, next) {
     // Build response values from joined tables.
     const workerName = `${data.staff.first_name} ${data.staff.last_name}`;
     const organizationName = data.staff.organizations?.name ?? "";
+    const photoUrl = data.staff.photo_url;
 
-    return res.status(200).json({ workerName, organizationName });
+    return res.status(200).json({ workerName, organizationName, photoUrl });
   } catch (error) {
     next(error);
   }
@@ -110,7 +111,9 @@ export async function submitVerification(req, res, next) {
           first_name,
           last_name,
           email,
-          photo_url
+          photo_url,
+          salary,
+          organization_id
         )
       `)
       .eq("token", token)
@@ -121,32 +124,18 @@ export async function submitVerification(req, res, next) {
     }
 
     const { id: verificationId, staff_id: staffId } = verificationRequest;
-    // --- FACE MATCHING STEP ---
-    const adminPhotoUrl = verificationRequest.staff.photo_url;
-    const snapshotBase64 = livenessData?.snapshot;
-    let finalVerdict = verdict;
-    let matchConfidence = null;
-
-    if (verdict === "verified" && snapshotBase64 && adminPhotoUrl) {
-      const matchResult = await compareFaces(snapshotBase64, adminPhotoUrl);
-      matchConfidence = matchResult.confidence;
-      if (!matchResult.match) {
-        finalVerdict = "flagged";
-        console.warn(`Face match failed for ${staffId}. Confidence: ${matchConfidence}%`);
-      }
-    }
-
+    
     // Update verification_requests record.
     const { error: verificationUpdateError } = await supabase
       .from("verification_requests")
       .update({
         liveness_score: trustScore,
-        final_score: matchConfidence !== null ? matchConfidence : trustScore, // Store match confidence
-        final_verdict: finalVerdict,
+        final_score: trustScore, 
+        final_verdict: verdict,
         challenges_passed: livenessData?.challengesPassed ?? 0,
         challenges_total: 3,
         status: "completed",
-        completed_at: completedAt,
+        completed_at: new Date().toISOString(),
       })
       .eq("id", verificationId);
 
@@ -154,33 +143,14 @@ export async function submitVerification(req, res, next) {
       throw verificationUpdateError;
     }
 
-    const isVerified = finalVerdict === "verified";
-    let vAccNum = null;
-    let vBankName = null;
-
-    if (isVerified) {
-      // Create Worker Virtual Account via Squad
-      const { createVirtualAccount } = await import("../services/squadService.js");
-      const vAccResult = await createVirtualAccount(
-        `${verificationRequest.staff.first_name} ${verificationRequest.staff.last_name}`,
-        verificationRequest.staff.email,
-        `WORKER-${staffId}`
-      );
-      if (vAccResult.success) {
-        vAccNum = vAccResult.data.accountNumber;
-        vBankName = vAccResult.data.bankName;
-      } else {
-        console.warn(`Worker Virtual Account creation failed for ${staffId}: ${vAccResult.error}`);
-      }
-    }
+    const isVerified = verdict === "verified";
 
     // Update staff record — only after the verification_requests update succeeds.
     const { error: staffUpdateError } = await supabase
       .from("staff")
       .update({
-        trust_score: matchConfidence !== null ? matchConfidence : trustScore,
+        trust_score: trustScore,
         status: isVerified ? "verified" : "flagged",
-        ...(isVerified && vAccNum ? { virtual_account_number: vAccNum, virtual_account_bank: vBankName } : {})
       })
       .eq("id", staffId);
 
@@ -188,15 +158,83 @@ export async function submitVerification(req, res, next) {
       throw staffUpdateError;
     }
 
+    // --- AUTOMATIC PAYMENT BATCH CREATION / ADDITION ---
+    if (isVerified) {
+      const orgId = verificationRequest.staff.organization_id;
+      const salary = verificationRequest.staff.salary || 0;
+      const currentMonth = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+      const batchName = `Salary Batch - ${currentMonth}`;
+
+      // 1. Check if a pending batch already exists for this organization
+      let { data: batch, error: batchError } = await supabase
+        .from("payment_batches")
+        .select("id, staff_count, total_amount")
+        .eq("organization_id", orgId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (batchError && batchError.code !== 'PGRST116') {
+        console.error("Error fetching payment batch:", batchError);
+      }
+
+      // 2. Create one if it doesn't exist
+      if (!batch) {
+        const { data: newBatch, error: createError } = await supabase
+          .from("payment_batches")
+          .insert({
+            organization_id: orgId,
+            batch_name: batchName,
+            staff_count: 0,
+            total_amount: 0,
+            status: "pending",
+            verification_rate: 100 // Default, will recalculate if needed
+          })
+          .select()
+          .single();
+          
+        if (createError) console.error("Failed to create batch:", createError);
+        batch = newBatch;
+      }
+
+      // 3. Add staff to the batch if not already added
+      if (batch) {
+        const { data: existingStaff } = await supabase
+          .from("payment_batch_staff")
+          .select("staff_id")
+          .eq("batch_id", batch.id)
+          .eq("staff_id", staffId)
+          .single();
+
+        if (!existingStaff) {
+          // Insert into payment_batch_staff
+          await supabase.from("payment_batch_staff").insert({
+            batch_id: batch.id,
+            staff_id: staffId
+          });
+
+          // Update batch totals
+          await supabase
+            .from("payment_batches")
+            .update({
+              staff_count: batch.staff_count + 1,
+              total_amount: batch.total_amount + salary
+            })
+            .eq("id", batch.id);
+        }
+      }
+    }
+
     // Log to audit_logs
     await supabase.from("audit_logs").insert({
       action: "LIVENESS_VERIFICATION_SUBMITTED",
-      description: `Liveness & Face Match submitted for staff ${staffId}. Verdict: ${finalVerdict} (Match Confidence: ${matchConfidence}%)`,
+      description: `Liveness & Face Match submitted for staff ${staffId}. Verdict: ${verdict} (Final Score: ${trustScore})`,
       entity_type: "verification_request",
       entity_id: verificationId,
     });
 
-    return res.status(200).json({ success: true, verdict: finalVerdict });
+    return res.status(200).json({ success: true, verdict });
   } catch (error) {
     next(error);
   }
