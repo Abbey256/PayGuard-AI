@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Dropdown } from "../ui/dropdown/Dropdown";
 import { DropdownItem } from "../ui/dropdown/DropdownItem";
 import { Link } from "react-router";
-import { Info, Bell, CheckCircle, AlertTriangle } from "lucide-react";
+import { Info, CheckCircle, AlertTriangle } from "lucide-react";
 import { supabase, fetchNotifications } from "../../lib/supabaseClient";
 
 export default function NotificationDropdown() {
@@ -86,9 +86,8 @@ export default function NotificationDropdown() {
         onClick={handleClick}
       >
         <span
-          className={`absolute right-0 top-0.5 z-10 h-2 w-2 rounded-full bg-orange-400 ${
-            unreadCount === 0 ? "hidden" : "flex"
-          }`}
+          className={`absolute right-0 top-0.5 z-10 h-2 w-2 rounded-full bg-orange-400 ${unreadCount === 0 ? "hidden" : "flex"
+            }`}
         >
           <span className="absolute inline-flex w-full h-full bg-orange-400 rounded-full opacity-75 animate-ping"></span>
         </span>
@@ -147,18 +146,16 @@ export default function NotificationDropdown() {
                     await markAsRead(n.id);
                     closeDropdown();
                   }}
-                  className={`flex gap-3 rounded-lg border-b border-gray-100 p-3 px-4.5 py-3 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-white/5 ${
-                    n.is_read ? "" : "bg-white/5"
-                  }`}
+                  className={`flex gap-3 rounded-lg border-b border-gray-100 p-3 px-4.5 py-3 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-white/5 ${n.is_read ? "" : "bg-white/5"
+                    }`}
                 >
-                  <div className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${
-                    n.type === 'error' ? 'bg-red-100 text-red-600' : 
-                    n.type === 'success' ? 'bg-emerald-100 text-emerald-600' : 
-                    'bg-blue-100 text-blue-600'
-                  }`}>
-                    {n.type === 'error' ? <AlertTriangle size={20} /> : 
-                     n.type === 'success' ? <CheckCircle size={20} /> : 
-                     <Info size={20} />}
+                  <div className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${n.type === 'error' ? 'bg-red-100 text-red-600' :
+                      n.type === 'success' ? 'bg-emerald-100 text-emerald-600' :
+                        'bg-blue-100 text-blue-600'
+                    }`}>
+                    {n.type === 'error' ? <AlertTriangle size={20} /> :
+                      n.type === 'success' ? <CheckCircle size={20} /> :
+                        <Info size={20} />}
                   </div>
 
                   <span className="block flex-1">
