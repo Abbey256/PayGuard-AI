@@ -11,6 +11,7 @@ import Payments from "./pages/PayGuard/Payments";
 import Reports from "./pages/PayGuard/Reports";
 import Settings from "./pages/PayGuard/Settings";
 import Profile from "./pages/PayGuard/Profile";
+import Notifications from "./pages/PayGuard/Notifications";
 import RootRedirect from "./components/auth/RootRedirect";
 import VerificationPage from "./pages/Verification/VerificationPage";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
@@ -38,6 +39,7 @@ export default function App() {
               <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
               <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
               <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+              <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
             </Route>
 
             {/* Auth Layout */}

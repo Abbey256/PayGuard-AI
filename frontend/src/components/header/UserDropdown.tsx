@@ -45,8 +45,13 @@ export default function UserDropdown() {
     }
 
     loadUser();
+
+    const handleOrgUpdate = () => loadUser();
+    window.addEventListener("org_name_updated", handleOrgUpdate);
+
     return () => {
       mounted = false;
+      window.removeEventListener("org_name_updated", handleOrgUpdate);
     };
   }, []);
   return (

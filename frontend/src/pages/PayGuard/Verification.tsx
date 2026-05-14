@@ -1,7 +1,7 @@
 import PageMeta from "../../components/common/PageMeta";
 import PageBreadCrumb from "../../components/common/PageBreadCrumb";
 import { useState, useEffect, useCallback } from "react";
-import { CheckCircle, Loader, RefreshCw } from "lucide-react";
+import { CheckCircle, Loader, RefreshCw, AlertTriangle } from "lucide-react";
 import { supabase, createNotification } from "../../lib/supabaseClient";
 
 interface VerificationRequest {
@@ -13,6 +13,7 @@ interface VerificationRequest {
   created_at: string;
   status: "pending" | "sent" | "completed";
   token_expires_at: string | null;
+  photo_url?: string | null;
 }
 
 // Toast
@@ -52,7 +53,7 @@ export default function Verification() {
           status,
           token_expires_at,
           created_at,
-          staff ( name, employee_id, email )
+          staff ( name, employee_id, email, photo_url )
         `)
         .order("created_at", { ascending: false });
 
@@ -67,6 +68,7 @@ export default function Verification() {
         created_at: row.created_at,
         status: row.status === "completed" ? "completed" : row.status,
         token_expires_at: row.token_expires_at,
+        photo_url: row.staff?.photo_url,
       }));
 
       setVerificationData(mapped);
@@ -149,6 +151,20 @@ export default function Verification() {
       <PageBreadCrumb pageTitle="Verification Center" />
 
       <div className="space-y-6">
+        {/* Warning Banner */}
+        {verificationData.some(v => !v.photo_url) && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/20 flex items-start gap-3">
+            <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={20} />
+            <div>
+              <h4 className="text-sm font-bold text-amber-900 dark:text-amber-100">
+                {verificationData.filter(v => !v.photo_url).length} staff members have no verification photo
+              </h4>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                They will not be able to complete face matching. Add photos in the Staff Management section before sending verification links.
+              </p>
+            </div>
+          </div>
+        )}
         {/* Stats */}
         <div className="grid gap-4 md:grid-cols-4">
           {[

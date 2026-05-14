@@ -1,5 +1,6 @@
 import PageMeta from "../../components/common/PageMeta";
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router";
 import {
   Users, CheckCircle, AlertTriangle, DollarSign,
   Sparkles, BarChart2, Upload, Settings,
@@ -15,6 +16,7 @@ interface DashboardStats {
 }
 
 export default function Home() {
+  const navigate = useNavigate();
   const [roundActive, setRoundActive] = useState(false);
   const [stats, setStats] = useState<DashboardStats>({
     totalStaff: 0,
@@ -109,8 +111,39 @@ export default function Home() {
               </p>
             </div>
             <button
-              onClick={() => setRoundActive(!roundActive)}
-              className="rounded-lg bg-emerald-600 px-8 py-3 font-semibold text-white hover:bg-emerald-700 transition shadow-lg flex items-center gap-2"
+              onClick={async () => {
+                if (roundActive) {
+                  setRoundActive(false);
+                  return;
+                }
+
+                if (!window.confirm("Start a new verification round? This will set all staff members to 'pending' status for this month's audit.")) return;
+
+                try {
+                  setIsLoading(true);
+                  // 1. Reset all staff to pending
+                  const { error: staffError } = await supabase
+                    .from("staff")
+                    .update({ status: "pending" })
+                    .not("status", "eq", "flagged"); // Keep flagged staff flagged
+
+                  if (staffError) throw staffError;
+
+                  // 2. Clear old verification requests (optional, but cleaner)
+                  // We'll keep them for history but maybe mark them as expired
+
+                  setRoundActive(true);
+                  // Refresh stats
+                  window.location.reload(); 
+                } catch (err) {
+                  console.error(err);
+                  alert("Failed to start new round");
+                } finally {
+                  setIsLoading(false);
+                }
+              }}
+              disabled={isLoading}
+              className="rounded-lg bg-emerald-600 px-8 py-3 font-semibold text-white hover:bg-emerald-700 transition shadow-lg flex items-center gap-2 disabled:opacity-50"
             >
               <Sparkles size={20} />
               {roundActive ? "Stop Verification Round" : "Start New Verification Round"}
@@ -182,13 +215,22 @@ export default function Home() {
         <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
           <h2 className="mb-4 text-lg font-bold text-gray-900 dark:text-white">Quick Actions</h2>
           <div className="grid gap-3 md:grid-cols-3">
-            <button className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2">
+            <button 
+              onClick={() => navigate("/reports")}
+              className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2"
+            >
               <BarChart2 size={20} /> Generate Report
             </button>
-            <button className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2">
+            <button 
+              onClick={() => navigate("/staff")}
+              className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2"
+            >
               <Upload size={20} /> Export Data
             </button>
-            <button className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2">
+            <button 
+              onClick={() => navigate("/settings")}
+              className="rounded-lg border border-gray-300 px-4 py-3 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition font-medium flex items-center gap-2"
+            >
               <Settings size={20} /> System Settings
             </button>
           </div>

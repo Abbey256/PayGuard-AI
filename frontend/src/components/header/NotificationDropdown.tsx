@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Dropdown } from "../ui/dropdown/Dropdown";
 import { DropdownItem } from "../ui/dropdown/DropdownItem";
 import { Link } from "react-router";
+import { Info, Bell, CheckCircle, AlertTriangle } from "lucide-react";
 import { supabase, fetchNotifications } from "../../lib/supabaseClient";
 
 export default function NotificationDropdown() {
@@ -150,15 +151,15 @@ export default function NotificationDropdown() {
                     n.is_read ? "" : "bg-white/5"
                   }`}
                 >
-                  <span className="relative block w-full h-10 rounded-full z-1 max-w-10">
-                    <img
-                      width={40}
-                      height={40}
-                      src="/images/user/user-02.jpg"
-                      alt="User"
-                      className="w-full overflow-hidden rounded-full"
-                    />
-                  </span>
+                  <div className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${
+                    n.type === 'error' ? 'bg-red-100 text-red-600' : 
+                    n.type === 'success' ? 'bg-emerald-100 text-emerald-600' : 
+                    'bg-blue-100 text-blue-600'
+                  }`}>
+                    {n.type === 'error' ? <AlertTriangle size={20} /> : 
+                     n.type === 'success' ? <CheckCircle size={20} /> : 
+                     <Info size={20} />}
+                  </div>
 
                   <span className="block flex-1">
                     <span className="mb-1.5 block  text-theme-sm text-gray-500 dark:text-gray-400 space-x-1">
@@ -178,8 +179,9 @@ export default function NotificationDropdown() {
           )}
         </ul>
         <Link
-          to="/"
-          className="block px-4 py-2 mt-3 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700"
+          to="/notifications"
+          onClick={closeDropdown}
+          className="block px-4 py-2 mt-3 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700 transition"
         >
           View All Notifications
         </Link>

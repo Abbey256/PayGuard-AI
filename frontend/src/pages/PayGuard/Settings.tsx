@@ -2,6 +2,7 @@ import PageMeta from "../../components/common/PageMeta";
 import PageBreadCrumb from "../../components/common/PageBreadCrumb";
 import { useState, useEffect } from "react";
 import { X, Loader, AlertTriangle } from "lucide-react";
+import { supabase } from "../../lib/supabaseClient";
 
 interface Toast {
   id: string;
@@ -23,7 +24,7 @@ function Toast({ message, type }: { message: string; type: "success" | "error" }
 
 export default function Settings() {
   const [settings, setSettings] = useState({
-    organizationName: "Federal Revenue Service",
+    organizationName: "Loading...",
     timezone: "WAT (West Africa Time)",
     verificationTimeout: "30",
     paymentReviewRequired: true,
@@ -46,16 +47,38 @@ export default function Settings() {
 
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Load settings from localStorage on mount
+  // Load settings from Supabase and localStorage on mount
   useEffect(() => {
+    async function loadOrg() {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { data: org } = await supabase
+          .from("organizations")
+          .select("name")
+          .eq("admin_id", user.id)
+          .single();
+
+        if (org) {
+          setSettings(prev => ({ ...prev, organizationName: org.name }));
+        }
+      } catch (err) {
+        console.error("Failed to load organization:", err);
+      }
+    }
+
     const savedSettings = localStorage.getItem("payguard_settings");
     if (savedSettings) {
       try {
-        setSettings(JSON.parse(savedSettings));
+        const parsed = JSON.parse(savedSettings);
+        setSettings(prev => ({ ...prev, ...parsed }));
       } catch (e) {
         console.error("Failed to load settings:", e);
       }
     }
+    
+    loadOrg();
   }, []);
 
   // Show toast notification
@@ -76,13 +99,35 @@ export default function Settings() {
   };
 
   // Save organization settings
-  const handleSaveOrgSettings = () => {
+  const handleSaveOrgSettings = async () => {
     if (!settings.organizationName.trim()) {
       showToast("Organization Name cannot be empty", "error");
       return;
     }
-    localStorage.setItem("payguard_settings", JSON.stringify(settings));
-    showToast("Organization settings saved");
+
+    try {
+      setIsProcessing(true);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
+
+      const { error } = await supabase
+        .from("organizations")
+        .update({ name: settings.organizationName })
+        .eq("admin_id", user.id);
+
+      if (error) throw error;
+
+      localStorage.setItem("payguard_settings", JSON.stringify(settings));
+      showToast("Organization settings saved");
+      
+      // Force a page reload or event to update Header (optional, but good for UX)
+      window.dispatchEvent(new Event("org_name_updated"));
+    } catch (err) {
+      console.error(err);
+      showToast("Failed to save to database", "error");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   // Save security settings
