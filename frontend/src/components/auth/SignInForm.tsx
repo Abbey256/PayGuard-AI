@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { supabase } from "../../lib/supabaseClient";
 import Label from "../form/Label";
@@ -8,12 +8,19 @@ import Input from "../form/input/InputField";
 
 export default function SignInForm() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (searchParams.get("expired") === "true") {
+      setInfoMessage("Your session has expired due to inactivity. Please sign in again.");
+    }
+  }, [searchParams]);
 
   async function handleForgotPassword() {
     setInfoMessage(null);

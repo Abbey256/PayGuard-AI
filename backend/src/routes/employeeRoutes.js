@@ -1,13 +1,13 @@
 // routes/employeeRoutes.js
-const express = require('express');
-const EmployeeController = require('../controllers/employeeController');
-const { uploadCSV } = require('../middleware/uploadCSV');
+import { Router } from 'express';
+import EmployeeController from '../controllers/employeeController.js';
+import { uploadCSV } from '../middleware/uploadCSV.js';
 
-const router = express.Router();
+const router = Router();
 
 router.post('/upload-payroll', uploadCSV, EmployeeController.uploadPayroll);
 router.get('/employees', EmployeeController.getEmployees);
 router.get('/verify/:token', EmployeeController.verifyEmployee);
 router.post('/verify/:token', EmployeeController.submitVerification);
 
-module.exports = router;
+export default router;

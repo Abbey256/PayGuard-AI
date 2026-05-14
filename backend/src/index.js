@@ -6,12 +6,9 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 
 // Routes
-import authRoutes from "./routes/auth.js";
-import staffRoutes from "./routes/staff.js";
 import verificationRoutes from "./routes/verification.js";
 import verifyRoutes from "./routes/verify.js";
 import paymentRoutes from "./routes/payments.js";
-import reportRoutes from "./routes/reports.js";
 import organizationRoutes from "./routes/organizations.js";
 
 const app = express();
@@ -30,12 +27,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(generalLimiter);
 
 // Routes
-app.use("/api/auth", authRoutes);
-app.use("/api/staff", staffRoutes);
 app.use("/api/verification", verificationRoutes);
 app.use("/api/verify", verifyRoutes);
 app.use("/api/payments", paymentRoutes);
-app.use("/api/reports", reportRoutes);
 app.use("/api/organizations", organizationRoutes);
 
 // Health check endpoint

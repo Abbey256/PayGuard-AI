@@ -3,7 +3,7 @@
 /**
  * Calculate Trust Score
  */
-const calculateTrustScore = (data) => {
+export const calculateTrustScore = (data) => {
     const {
         attendance_days = 0,
         faceMatchScore = 70,
@@ -32,6 +32,4 @@ const calculateTrustScore = (data) => {
     score = attendanceScore + faceScore + attemptScore + statusScore;
 
     return Math.round(Math.max(0, Math.min(100, score)));
-};
-
-module.exports = { calculateTrustScore };
+};

@@ -1,8 +1,7 @@
 // models/employeeModel.js
-const supabase = require('../config/supabase');
+import { supabase } from '../services/supabaseClient.js';
 
 class EmployeeModel {
-
     async createEmployees(employees) {
         const { data, error } = await supabase
             .from('employees')
@@ -39,4 +38,4 @@ class EmployeeModel {
     }
 }
 
-module.exports = new EmployeeModel();
+export default new EmployeeModel();

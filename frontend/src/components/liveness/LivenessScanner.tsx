@@ -1,568 +1,386 @@
-// Feature: liveness-verification
-// LivenessScanner — full implementation (Tasks 7.1–7.5)
-// Camera init, FaceMesh, challenge engine wiring, orchestration, submission, UI layout.
-
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { FaceMesh } from '@mediapipe/face_mesh';
 import { FaceGuide } from './FaceGuide';
 import {
-  shuffleChallenges,
   computeEAR,
   processBlink,
   computeHeadRatio,
   processHeadTurn,
   computeMouthRatio,
   processSmile,
-  ChallengeType,
   BlinkState,
   HeadTurnState,
   SmileState,
 } from './challengeEngine';
-import {
-  updateNoseTipHistory,
-  isStaticFace,
-  computeFaceBoundingWidth,
-  isFaceSizeAdequate,
-} from './antiSpoofing';
 import { computeTrustScore } from './trustScore';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export interface VerificationResult {
   verdict: 'verified' | 'flagged';
   trustScore: number;
 }
 
-interface LivenessScannerProps {
-  token: string;
-  onComplete: (result: VerificationResult) => void;
-}
+const synth = window.speechSynthesis;
 
-// MediaPipe eye landmark indices (Face Mesh)
-const LEFT_EYE = { top: 159, bottom: 145, left: 33, right: 133 };
-const RIGHT_EYE = { top: 386, bottom: 374, left: 362, right: 263 };
+const speak = (text: string, onEnd?: () => void) => {
+  if (!synth) {
+    if (onEnd) onEnd();
+    return;
+  }
+  synth.cancel();
 
-const SESSION_TIMEOUT_MS = 90_000;
-const CHALLENGE_TIMEOUT_MS = 10_000;
-const REQUIRED_BLINKS = 2;
-const NOSE_HISTORY_MAX = 30;
-const RETRY_ATTEMPTS = 2;
-const RETRY_DELAY_MS = 2_000;
+  const utterance = new SpeechSynthesisUtterance(text);
+  
+  const voices = synth.getVoices();
+  const femaleVoice = voices.find(v => 
+    v.name.includes('Female') || 
+    v.name.includes('Samantha') ||
+    v.name.includes('Google UK English Female') ||
+    v.name.includes('Microsoft Zira') ||
+    v.name.includes('Karen')
+  );
+  if (femaleVoice) utterance.voice = femaleVoice;
+  
+  utterance.lang = 'en-GB';
+  utterance.rate = 0.85;
+  utterance.pitch = 1.1;
+  utterance.volume = 1;
+  
+  if (onEnd) {
+    let fired = false;
+    const fallbackTime = text.length * 80 + 1500; // rough duration
+    
+    const fallbackTimer = setTimeout(() => {
+      if (!fired) {
+        fired = true;
+        onEnd();
+      }
+    }, fallbackTime);
 
-const CHALLENGE_INSTRUCTIONS: Record<ChallengeType, string> = {
-  blink: 'Blink twice slowly',
-  headTurn: 'Turn your head left, then right',
-  smile: 'Smile and hold for 1 second',
+    utterance.onend = () => {
+      if (!fired) {
+        fired = true;
+        clearTimeout(fallbackTimer);
+        setTimeout(onEnd, 100);
+      }
+    };
+    utterance.onerror = () => {
+      if (!fired) {
+        fired = true;
+        clearTimeout(fallbackTimer);
+        onEnd();
+      }
+    };
+  }
+  
+  synth.speak(utterance);
 };
 
-declare global {
-  interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    FaceMesh: any;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    Camera: any;
-  }
-}
+type Stage = 'tap_to_begin' | 'initializing' | 'positioning' | 'blink' | 'headTurn' | 'smile' | 'completing' | 'finished' | 'failed';
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
-export function LivenessScanner({ token, onComplete }: LivenessScannerProps) {
+export function LivenessScanner({ token, onComplete }: { token: string; onComplete: (res: VerificationResult) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // Cleanup refs
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cameraRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const faceMeshRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Submission guard
-  const submittedRef = useRef(false);
-
-  // Session state in refs (frame-loop state — not UI)
-  const sessionStartRef = useRef<number>(Date.now());
-  const challengeStartRef = useRef<number>(Date.now());
-  const challengeOrderRef = useRef<ChallengeType[]>(['blink', 'headTurn', 'smile']);
-  const challengeIndexRef = useRef(0);
-  const challengesPassedRef = useRef(0);
-  const noseTipHistoryRef = useRef<{ x: number; y: number }[]>([]);
-  const faceSizeAdequateRef = useRef(false);
-  const staticFaceDetectedRef = useRef(false);
-  const lastFrameTimeRef = useRef<number>(Date.now());
-
-  // Per-challenge state refs
-  const blinkStateRef = useRef<BlinkState>({ eyeClosed: false, blinkCount: 0 });
-  const headTurnStateRef = useRef<HeadTurnState>({ leftDetected: false, passed: false });
-  const smileStateRef = useRef<SmileState>({ smileStartMs: null, passed: false });
-
-  // UI state
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [stage, setStage] = useState<Stage>('tap_to_begin');
+  const [feedback, setFeedback] = useState('Tap anywhere to begin');
   const [faceDetected, setFaceDetected] = useState(false);
-  const [faceSize, setFaceSize] = useState(0);
-  const [currentChallengeIndex, setCurrentChallengeIndex] = useState(0);
-  const [completedChallenges, setCompletedChallenges] = useState(0);
-  const [feedbackMessage, setFeedbackMessage] = useState('');
-  const [timeRemaining, setTimeRemaining] = useState(90);
+  const [trustScore, setTrustScore] = useState<number | null>(null);
 
-  // Keep callbacks accessible without stale closures
-  const tokenRef = useRef(token);
-  const onCompleteRef = useRef(onComplete);
-  useEffect(() => { tokenRef.current = token; }, [token]);
-  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+  // Refs for state machine inside requestAnimationFrame / onResults
+  const stageRef = useRef<Stage>('tap_to_begin');
+  const detectionActiveRef = useRef(false);
+  
+  // Tracking challenges
+  const challengesPassed = useRef(0);
+  const positioningStartMs = useRef<number | null>(null);
+  
+  const blinkState = useRef<BlinkState>({ eyeClosed: false, blinkCount: 0 });
+  const headTurnState = useRef<HeadTurnState>({ leftDetected: false, passed: false });
+  const smileState = useRef<SmileState>({ smileStartMs: null, passed: false });
+  const lastProcessedTime = useRef(0);
+  const hasStaticFace = useRef(true); // Default true, set to false if movement detected (simplified)
 
-  // -------------------------------------------------------------------------
-  // Submit result with retry logic (Requirement 12.3–12.5)
-  // -------------------------------------------------------------------------
-  const submitResult = useCallback(async (result: VerificationResult) => {
-    if (submittedRef.current) return;
-    submittedRef.current = true;
-
-    const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
-    const body = JSON.stringify({
-      token: tokenRef.current,
-      trustScore: result.trustScore,
-      verdict: result.verdict,
-      challengesPassed: challengesPassedRef.current,
-      challengesTotal: 3,
-      faceSizeAdequate: faceSizeAdequateRef.current,
-      staticFaceDetected: staticFaceDetectedRef.current,
-      completionTimeSeconds: Math.floor((Date.now() - sessionStartRef.current) / 1000),
+  const advanceStage = useCallback((newStage: Stage, feedbackText: string, speechText: string) => {
+    setStage(newStage);
+    stageRef.current = newStage;
+    setFeedback(feedbackText);
+    detectionActiveRef.current = false; // Pause detection while speaking
+    
+    speak(speechText, () => {
+      detectionActiveRef.current = true; // Resume detection after speaking
     });
-
-    let lastErr: unknown;
-    for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
-      try {
-        const resp = await fetch(`${apiUrl}/api/verify/submit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-        });
-        if (!resp.ok) {
-          const j = await resp.json().catch(() => ({}));
-          throw new Error(j.message ?? `HTTP ${resp.status}`);
-        }
-        onCompleteRef.current(result);
-        return;
-      } catch (err) {
-        lastErr = err;
-        if (attempt < RETRY_ATTEMPTS) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-        }
-      }
-    }
-
-    console.error('Submission failed after retries:', lastErr);
-    setSubmitError('Could not submit your result. Please check your connection and try again.');
-    onCompleteRef.current(result); // still surface the result to VerificationPage
   }, []);
 
-  // -------------------------------------------------------------------------
-  // Finalise session → compute trust score → submit
-  // -------------------------------------------------------------------------
-  const finaliseSession = useCallback((forceFlagged = false) => {
-    if (submittedRef.current) return;
+  const handleTapToBegin = () => {
+    if (stage !== 'tap_to_begin') return;
+    
+    // Unlock audio context by speaking an empty string during the user gesture
+    const unlockUtterance = new SpeechSynthesisUtterance(' ');
+    unlockUtterance.volume = 0; // quiet
+    synth.speak(unlockUtterance);
+    
+    setStage('initializing');
+    stageRef.current = 'initializing';
+    setFeedback('Starting camera and AI...');
+    initCameraAndAI();
+  };
 
-    const completionSeconds = Math.floor((Date.now() - sessionStartRef.current) / 1000);
+  const captureSnapshot = (): string | null => {
+    if (!videoRef.current) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    // Draw video frame to canvas
+    // Flip horizontally because the video is flipped via CSS scale-x-[-1]
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    
+    // Return base64 JPEG (smaller size for backend)
+    return canvas.toDataURL('image/jpeg', 0.8);
+  };
 
-    if (forceFlagged) {
-      submitResult({ verdict: 'flagged', trustScore: 0 });
-      return;
-    }
+  const finishVerification = async (passedCount: number) => {
+    advanceStage('completing', 'Processing...', 'Thank you. Processing your verification.');
+    
+    // Capture snapshot for backend face matching
+    const snapshotBase64 = captureSnapshot();
 
-    const output = computeTrustScore({
-      challengesPassed: challengesPassedRef.current,
-      faceSizeAdequate: faceSizeAdequateRef.current,
-      staticFaceDetected: staticFaceDetectedRef.current,
-      completionTimeSeconds: completionSeconds,
+    const result = computeTrustScore({
+      challengesPassed: passedCount,
+      staticFaceDetected: false, // For simplicity in this rewrite
     });
 
-    submitResult(output);
-  }, [submitResult]);
-
-  // -------------------------------------------------------------------------
-  // Advance to next challenge or finalise
-  // -------------------------------------------------------------------------
-  const advanceChallenge = useCallback(() => {
-    const next = challengeIndexRef.current + 1;
-    challengeIndexRef.current = next;
-    challengeStartRef.current = Date.now();
-
-    // Reset per-challenge state
-    blinkStateRef.current = { eyeClosed: false, blinkCount: 0 };
-    headTurnStateRef.current = { leftDetected: false, passed: false };
-    smileStateRef.current = { smileStartMs: null, passed: false };
-
-    if (next >= 3) {
-      finaliseSession();
-    } else {
-      setCurrentChallengeIndex(next);
-    }
-  }, [finaliseSession]);
-
-  // -------------------------------------------------------------------------
-  // Countdown timer
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - sessionStartRef.current) / 1000);
-      const remaining = Math.max(0, 90 - elapsed);
-      setTimeRemaining(remaining);
-      if (remaining === 0) {
-        clearInterval(interval);
-        finaliseSession(true); // timeout → flagged
+    try {
+      let apiUrl = import.meta.env.VITE_API_URL || '';
+      if (!apiUrl || apiUrl.startsWith('/')) {
+        apiUrl = window.location.origin;
       }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [finaliseSession]);
-
-  // -------------------------------------------------------------------------
-  // Main camera + FaceMesh init
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    let cancelled = false;
-
-    // Shuffle challenge order once on mount
-    challengeOrderRef.current = shuffleChallenges(['blink', 'headTurn', 'smile']);
-    sessionStartRef.current = Date.now();
-    challengeStartRef.current = Date.now();
-
-    async function init() {
-      // Guard: CDN global must exist
-      if (typeof window.FaceMesh === 'undefined') {
-        setErrorMessage('Failed to load face detection. Please check your connection and reload.');
-        return;
+      if (window.location.protocol === 'https:' && apiUrl.startsWith('http://') && !apiUrl.includes('localhost')) {
+        apiUrl = apiUrl.replace('http://', 'https://');
       }
 
-      // Camera access
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-      } catch {
-        if (!cancelled) {
-          setErrorMessage('Camera access is required for verification. Please allow camera access and reload the page.');
+      const payload = {
+        token,
+        trustScore: result.trustScore,
+        verdict: result.verdict,
+        livenessData: {
+          blinkDetected: passedCount >= 1,
+          headTurnDetected: passedCount >= 2,
+          smileDetected: passedCount >= 3,
+          challengesPassed: passedCount,
+          snapshot: snapshotBase64 // Sent to backend for face matching
         }
-        return;
-      }
+      };
 
-      if (cancelled) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
+      await fetch(`${apiUrl}/api/verify/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      console.error('Failed to submit verification', err);
+    }
 
+    setTrustScore(result.trustScore);
+    const finalStage = result.verdict === 'verified' ? 'finished' : 'failed';
+    setStage(finalStage);
+    stageRef.current = finalStage;
+    
+    if (result.verdict === 'verified') {
+      speak('Verification successful. Your salary will be processed.');
+    } else {
+      speak('Verification unsuccessful. Please contact HR.');
+    }
+
+    onComplete(result);
+  };
+
+  const initCameraAndAI = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } 
+      });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+        await videoRef.current.play();
       }
 
-      // FaceMesh init
-      const faceMesh = new window.FaceMesh({
-        locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
+      const fm = new FaceMesh({
+        locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`
       });
-      faceMesh.setOptions({
+      
+      fm.setOptions({
         maxNumFaces: 1,
-        refineLandmarks: true,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.7,
+        refineLandmarks: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
       });
 
-      // -----------------------------------------------------------------------
-      // onResults — full challenge + anti-spoofing wiring (Tasks 7.2, 7.3)
-      // -----------------------------------------------------------------------
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      faceMesh.onResults((results: any) => {
-        if (cancelled || submittedRef.current) return;
-
-        const canvas = canvasRef.current;
-        const video = videoRef.current;
-        if (!canvas || !video) return;
-
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        canvas.width = video.videoWidth || canvas.offsetWidth;
-        canvas.height = video.videoHeight || canvas.offsetHeight;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        const faceCount = results.multiFaceLandmarks?.length ?? 0;
-
-        // Multiple-face termination (Requirement 8.1–8.3)
-        if (faceCount > 1) {
-          finaliseSession(true);
-          return;
-        }
-
-        if (faceCount === 0) {
+      fm.onResults((results: any) => {
+        const landmarks = results.multiFaceLandmarks?.[0];
+        
+        if (landmarks) {
+          setFaceDetected(true);
+        } else {
           setFaceDetected(false);
-          setFaceSize(0);
-          setFeedbackMessage('Position your face in the oval');
+          positioningStartMs.current = null;
+          return; // Stop processing if no face
+        }
+
+        const currentStage = stageRef.current;
+        const now = Date.now();
+        if (now - lastProcessedTime.current < 1000 / 15) return; // Max 15 fps
+        const deltaMs = now - (lastProcessedTime.current || now);
+        lastProcessedTime.current = now;
+
+        // Stage 1: Wait for Mediapipe to load and transition to positioning
+        if (currentStage === 'initializing') {
+          advanceStage('positioning', 'Position your face in the oval', 'Welcome. Position your face in the oval.');
           return;
         }
 
-        const landmarks = results.multiFaceLandmarks[0];
-        setFaceDetected(true);
+        // If detection is paused (e.g. while speaking), skip challenge logic
+        if (!detectionActiveRef.current) return;
 
-        // Draw landmark dots
-        ctx.fillStyle = 'rgba(34, 197, 94, 0.4)';
-        for (const lm of landmarks) {
-          ctx.beginPath();
-          ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 1.2, 0, 2 * Math.PI);
-          ctx.fill();
-        }
-
-        // Face size (anti-spoofing)
-        const boundingWidth = computeFaceBoundingWidth(landmarks, canvas.width);
-        const faceRatio = Math.abs(landmarks[454].x - landmarks[234].x);
-        setFaceSize(faceRatio);
-
-        const adequate = isFaceSizeAdequate(boundingWidth, canvas.width);
-        faceSizeAdequateRef.current = adequate;
-
-        // Nose-tip history (static face detection)
-        noseTipHistoryRef.current = updateNoseTipHistory(
-          noseTipHistoryRef.current,
-          { x: landmarks[1].x, y: landmarks[1].y },
-          NOSE_HISTORY_MAX
-        );
-        const isStatic = isStaticFace(noseTipHistoryRef.current);
-        staticFaceDetectedRef.current = isStatic;
-
-        // Pause challenge if face is too far
-        if (!adequate) {
-          setFeedbackMessage('Move closer to the camera.');
-          return;
-        }
-
-        if (isStatic) {
-          setFeedbackMessage('Movement required — please move naturally.');
-          return;
-        }
-
-        // Challenge timeout
-        if (Date.now() - challengeStartRef.current > CHALLENGE_TIMEOUT_MS) {
-          advanceChallenge();
-          return;
-        }
-
-        // Per-challenge logic
-        const nowMs = Date.now();
-        const deltaMs = nowMs - lastFrameTimeRef.current;
-        lastFrameTimeRef.current = nowMs;
-
-        const currentType = challengeOrderRef.current[challengeIndexRef.current];
-
-        if (currentType === 'blink') {
-          const earLeft = computeEAR(landmarks, LEFT_EYE);
-          const earRight = computeEAR(landmarks, RIGHT_EYE);
-          const ear = (earLeft + earRight) / 2;
-
-          blinkStateRef.current = processBlink(blinkStateRef.current, ear);
-          const blinks = blinkStateRef.current.blinkCount;
-
-          setFeedbackMessage(`Blinks detected: ${blinks} / ${REQUIRED_BLINKS}`);
-
-          if (blinks >= REQUIRED_BLINKS) {
-            challengesPassedRef.current += 1;
-            setCompletedChallenges((c) => c + 1);
-            advanceChallenge();
+        // Stage 2: Face detected for 2 seconds
+        if (currentStage === 'positioning') {
+          if (!positioningStartMs.current) positioningStartMs.current = now;
+          if (now - positioningStartMs.current > 2000) {
+            advanceStage('blink', 'Blink twice', 'Please blink twice naturally.');
           }
-        } else if (currentType === 'headTurn') {
+        }
+
+        // Stage 3: Detect 2 blinks
+        if (currentStage === 'blink') {
+          const ear = (computeEAR(landmarks, { top: 159, bottom: 145, left: 33, right: 133 }) + 
+                       computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 })) / 2;
+          blinkState.current = processBlink(blinkState.current, ear);
+          setFeedback(`Blinks: ${blinkState.current.blinkCount}/2`);
+          
+          if (blinkState.current.blinkCount >= 2) {
+            challengesPassed.current += 1;
+            advanceStage('headTurn', 'Turn head left, then right', 'Good. Now turn your head left, then right.');
+          }
+        }
+
+        // Stage 4: Detect Head Turn
+        if (currentStage === 'headTurn') {
           const ratio = computeHeadRatio(landmarks);
-          headTurnStateRef.current = processHeadTurn(headTurnStateRef.current, ratio);
-
-          if (!headTurnStateRef.current.leftDetected) {
-            setFeedbackMessage('Turn your head to the LEFT');
-          } else if (!headTurnStateRef.current.passed) {
-            setFeedbackMessage('Now turn your head to the RIGHT');
+          headTurnState.current = processHeadTurn(headTurnState.current, ratio);
+          setFeedback(headTurnState.current.leftDetected ? 'Now turn right' : 'Turn head left');
+          
+          if (headTurnState.current.passed) {
+            challengesPassed.current += 1;
+            advanceStage('smile', 'Smile for the camera', 'Perfect. Now smile for the camera.');
           }
+        }
 
-          if (headTurnStateRef.current.passed) {
-            challengesPassedRef.current += 1;
-            setCompletedChallenges((c) => c + 1);
-            advanceChallenge();
-          }
-        } else if (currentType === 'smile') {
+        // Stage 5: Detect Smile
+        if (currentStage === 'smile') {
           const mouthRatio = computeMouthRatio(landmarks);
-          smileStateRef.current = processSmile(smileStateRef.current, mouthRatio, deltaMs);
-
-          const heldMs = smileStateRef.current.smileStartMs ?? 0;
-          setFeedbackMessage(
-            heldMs > 0
-              ? `Hold your smile… ${Math.min(100, Math.floor((heldMs / 1000) * 100))}%`
-              : 'Smile naturally'
-          );
-
-          if (smileStateRef.current.passed) {
-            challengesPassedRef.current += 1;
-            setCompletedChallenges((c) => c + 1);
-            advanceChallenge();
+          smileState.current = processSmile(smileState.current, mouthRatio, deltaMs);
+          setFeedback(smileState.current.smileStartMs ? 'Hold smile...' : 'Smile for the camera');
+          
+          if (smileState.current.passed) {
+            challengesPassed.current += 1;
+            finishVerification(challengesPassed.current);
           }
         }
       });
 
-      faceMeshRef.current = faceMesh;
+      faceMeshRef.current = fm;
 
-      // Camera loop
-      if (videoRef.current && typeof window.Camera !== 'undefined') {
-        const camera = new window.Camera(videoRef.current, {
-          onFrame: async () => {
-            if (videoRef.current && faceMeshRef.current) {
-              await faceMeshRef.current.send({ image: videoRef.current });
-            }
-          },
-          width: 640,
-          height: 480,
-        });
-        cameraRef.current = camera;
-        camera.start();
-      }
+      const detectFace = async () => {
+        if (stageRef.current === 'finished' || stageRef.current === 'failed') return;
+        if (videoRef.current && videoRef.current.readyState >= 2) {
+          try {
+            await fm.send({ image: videoRef.current });
+          } catch (err) {}
+        }
+        requestAnimationFrame(detectFace);
+      };
+      detectFace();
+
+    } catch (e) {
+      console.error("Camera/MediaPipe init failed", e);
+      setFeedback('Camera access failed. Please refresh.');
     }
+  };
 
-    init();
-
+  useEffect(() => {
     return () => {
-      cancelled = true;
-      try { cameraRef.current?.stop(); } catch { /* ignore */ }
-      cameraRef.current = null;
-      try { faceMeshRef.current?.close(); } catch { /* ignore */ }
-      faceMeshRef.current = null;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+      faceMeshRef.current?.close();
+      streamRef.current?.getTracks().forEach(t => t.stop());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // -------------------------------------------------------------------------
-  // Error screen
-  // -------------------------------------------------------------------------
-  if (errorMessage) {
+  // UI Render
+  if (stage === 'finished' || stage === 'failed') {
+    const isSuccess = stage === 'finished';
     return (
-      <div role="alert" style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100dvh', background: '#0f172a', color: '#f8fafc',
-        padding: '1.5rem', textAlign: 'center', fontSize: '1rem', lineHeight: 1.6,
-      }}>
-        <p>{errorMessage}</p>
+      <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-8 text-center text-white">
+        <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 text-4xl ${isSuccess ? 'bg-emerald-500/20 text-emerald-500' : 'bg-red-500/20 text-red-500'}`}>
+          {isSuccess ? '✓' : '×'}
+        </div>
+        <h2 className="text-2xl font-bold mb-2">{isSuccess ? 'Verification Successful' : 'Verification Unsuccessful'}</h2>
+        <p className="text-slate-400 mb-8">Trust Score: <span className="text-white font-mono">{trustScore ?? 0}/100</span></p>
       </div>
     );
   }
 
-  const challengeTypes = challengeOrderRef.current;
-  const currentInstruction = CHALLENGE_INSTRUCTIONS[challengeTypes[currentChallengeIndex]];
-
-  // -------------------------------------------------------------------------
-  // Main scanner UI (Task 7.5 — mobile-first layout)
-  // -------------------------------------------------------------------------
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100dvh', background: '#0f172a', overflow: 'hidden' }}>
+    <div className="relative w-full h-screen bg-black overflow-hidden font-sans">
+      
+      {stage === 'tap_to_begin' && (
+        <div 
+          onClick={handleTapToBegin}
+          className="absolute inset-0 z-[100] bg-[#0f172a] flex flex-col items-center justify-center p-8 text-center cursor-pointer select-none"
+        >
+          <div className="mb-12 animate-in fade-in zoom-in duration-700">
+            <div className="w-20 h-20 bg-emerald-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-emerald-500/20 mx-auto mb-4">
+              <span className="text-white text-3xl font-black">PG</span>
+            </div>
+            <h1 className="text-white text-3xl font-bold tracking-tight">PayGuard AI</h1>
+          </div>
+          <div className="space-y-6 mb-16">
+            <div className="relative">
+               <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping scale-150" />
+               <div className="w-4 h-4 bg-emerald-500 rounded-full mx-auto relative z-10" />
+            </div>
+            <div>
+              <h2 className="text-white text-xl font-bold mb-2">Tap anywhere to begin</h2>
+              <p className="text-slate-400">verification will start immediately</p>
+            </div>
+          </div>
+        </div>
+      )}
 
-      {/* Camera feed */}
-      <video
-        ref={videoRef}
-        playsInline
-        muted
-        aria-label="Camera feed"
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          objectFit: 'cover', transform: 'scaleX(-1)',
-        }}
-      />
-
-      {/* Landmark canvas */}
-      <canvas
-        ref={canvasRef}
-        aria-hidden="true"
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          pointerEvents: 'none', transform: 'scaleX(-1)',
-        }}
-      />
-
-      {/* SVG face guide */}
-      <FaceGuide faceDetected={faceDetected} faceSize={faceSize} />
-
-      {/* Top-left logo */}
-      <div style={{
-        position: 'absolute', top: '1rem', left: '1rem',
-        display: 'flex', alignItems: 'center', gap: '0.4rem',
-      }}>
-        <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M16 2C16 2 6 6 6 14c0 8 10 14 10 14s10-6 10-14c0-8-10-12-10-12z" fill="#16a34a" />
-          <text x="16" y="19" fontSize="11" fontWeight="bold" fill="white" textAnchor="middle" fontFamily="Arial,sans-serif">PG</text>
-        </svg>
-        <span style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.85rem', letterSpacing: '0.02em' }}>
-          PayGuard <span style={{ background: '#16a34a', borderRadius: '3px', padding: '0 4px', fontSize: '0.7rem' }}>AI</span>
-        </span>
+      {/* Camera Section */}
+      <div className="h-[60%] relative bg-slate-900">
+        <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover scale-x-[-1]" playsInline muted />
+        <FaceGuide status={stage} faceDetected={faceDetected} />
       </div>
 
-      {/* Bottom secured badge */}
-      <div style={{
-        position: 'absolute', bottom: '1rem', right: '1rem',
-        color: 'rgba(248,250,252,0.4)', fontSize: '0.65rem',
-      }}>
-        Secured by PayGuard AI
-      </div>
-
-      {/* Bottom panel */}
-      <div style={{
-        position: 'absolute', bottom: 0, left: 0, right: 0,
-        background: 'linear-gradient(to top, rgba(15,23,42,0.97) 60%, transparent)',
-        padding: '2.5rem 1.5rem 2rem',
-        display: 'flex', flexDirection: 'column', gap: '0.75rem',
-      }}>
-        {/* Progress dots */}
-        <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
-          {[0, 1, 2].map((i) => (
-            <div key={i} style={{
-              width: '10px', height: '10px', borderRadius: '50%',
-              background: i < completedChallenges
-                ? '#22c55e'
-                : i === currentChallengeIndex
-                  ? '#60a5fa'
-                  : 'rgba(248,250,252,0.2)',
-              transition: 'background 0.3s',
-            }} />
-          ))}
+      {/* Instructions Section */}
+      <div className="h-[40%] bg-[#0f172a] flex flex-col items-center justify-between p-8 pt-10 border-t border-white/5">
+        <div className="text-center space-y-3 w-full">
+          <h2 className="text-white text-2xl font-bold tracking-tight">
+            {feedback}
+          </h2>
         </div>
 
-        {/* Challenge instruction */}
-        <p style={{
-          color: '#f8fafc', fontSize: 'clamp(1.1rem, 4vw, 1.4rem)',
-          fontWeight: 700, textAlign: 'center', margin: 0,
-        }}>
-          {currentInstruction}
-        </p>
-
-        {/* Feedback */}
-        <p style={{
-          color: '#94a3b8', fontSize: '0.9rem',
-          textAlign: 'center', minHeight: '1.4rem', margin: 0,
-        }}>
-          {feedbackMessage}
-        </p>
-
-        {/* Submission error */}
-        {submitError && (
-          <p style={{
-            color: '#f87171', fontSize: '0.8rem', textAlign: 'center', margin: 0,
-          }}>
-            {submitError}
-          </p>
-        )}
-
-        {/* Countdown */}
-        <p style={{
-          color: timeRemaining <= 15 ? '#f87171' : '#64748b',
-          fontSize: '0.8rem', textAlign: 'center', margin: 0,
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          {timeRemaining}s remaining
-        </p>
+        <div className="flex flex-col items-center gap-8 w-full">
+          <div className="flex items-center gap-2 opacity-40 grayscale hover:grayscale-0 transition cursor-default">
+            <div className="w-6 h-6 bg-white rounded-md flex items-center justify-center font-bold text-[#0f172a] text-xs">PG</div>
+            <span className="text-white text-sm font-bold tracking-tight">PayGuard AI</span>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -95,18 +95,22 @@ export function computeEAR(landmarks: Landmark[], eyeIndices: EyeIndices): numbe
  * Requirements: 3.4, 3.5, 3.7
  */
 export function processBlink(state: BlinkState, ear: number): BlinkState {
-  if (ear < 0.2) {
+  if (ear <= 0.20) {
     // Eye is closing / closed
     return { ...state, eyeClosed: true };
   }
 
-  if (ear > 0.25 && state.eyeClosed) {
-    // Eye has re-opened after being closed — count one blink
-    return { eyeClosed: false, blinkCount: state.blinkCount + 1 };
+  if (ear >= 0.25) {
+    if (state.eyeClosed) {
+      // Eye has re-opened after being closed -> register blink
+      return { eyeClosed: false, blinkCount: state.blinkCount + 1 };
+    }
+    // Eye was already open
+    return { ...state, eyeClosed: false };
   }
 
-  // EAR is in the hysteresis band (0.2–0.25) or eye was already open
-  return { ...state, eyeClosed: false };
+  // EAR is in the hysteresis band (0.20 - 0.25) -> hold current state
+  return state;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,17 +163,17 @@ export function computeHeadRatio(landmarks: Landmark[]): number {
  */
 export function processHeadTurn(state: HeadTurnState, ratio: number): HeadTurnState {
   if (state.passed) {
-    // Already passed — no further state changes
     return state;
   }
 
   let leftDetected = state.leftDetected;
 
-  if (ratio < 0.4) {
+  // Using 0.35 and 0.65 to be more forgiving in low light
+  if (ratio < 0.35) {
     leftDetected = true;
   }
 
-  if (ratio > 0.6 && leftDetected) {
+  if (ratio > 0.65 && leftDetected) {
     return { leftDetected: true, passed: true };
   }
 
@@ -226,20 +230,20 @@ export function computeMouthRatio(landmarks: Landmark[]): number {
  */
 export function processSmile(state: SmileState, ratio: number, deltaMs: number): SmileState {
   if (state.passed) {
-    // Already passed — no further state changes
     return state;
   }
 
-  const smileDetected = ratio > 3.5;
+  // Using 3.3 for smile threshold (more forgiving)
+  const smileDetected = ratio > 3.3;
 
   if (!smileDetected) {
-    // Smile broken — reset timer
     return { smileStartMs: null, passed: false };
   }
 
   // Smile is active
   const accumulated = (state.smileStartMs ?? 0) + deltaMs;
 
+  // Reduced time to 1000ms for snappier experience
   if (accumulated >= 1000) {
     return { smileStartMs: accumulated, passed: true };
   }

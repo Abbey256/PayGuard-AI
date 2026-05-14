@@ -24,11 +24,14 @@ export async function setupOrganization(req, res, next) {
     const squadSubAccountId = squadResult.success ? squadResult.data.subAccountId : null;
 
     // 2. Create Ministry Virtual Account
-    const virtualAccResult = await createVirtualAccount(
-      orgName,
-      email,
-      `ORG-${orgId}`
-    );
+    const virtualAccResult = await createVirtualAccount({
+      customerName: orgName,
+      email: email,
+      phone: phone,
+      organizationId: orgId
+    });
+
+
 
     const virtualAccountNum = virtualAccResult.success ? virtualAccResult.data.accountNumber : null;
     const virtualBankName = virtualAccResult.success ? virtualAccResult.data.bankName : null;
@@ -46,15 +49,20 @@ export async function setupOrganization(req, res, next) {
         squad_wallet_balance: 0,
         ministry_virtual_account_number: virtualAccountNum,
         ministry_virtual_account_bank: virtualBankName,
-        updated_at: new Date().toISOString(),
+        // updated_at will be handled by DB default/trigger if present
       })
       .eq("id", orgId)
       .eq("admin_id", adminId); // safety: only owner can update their org
 
     if (updateError) {
-      console.error("Organization update failed:", updateError);
-      return res.status(500).json({ success: false, message: "Failed to activate organization" });
+      console.error("❌ Organization update failed:", updateError.message);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Failed to activate organization",
+        error: updateError.message 
+      });
     }
+
 
     return res.json({
       success: true,

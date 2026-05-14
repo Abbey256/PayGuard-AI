@@ -1,7 +1,8 @@
 // controllers/employeeController.js
-const EmployeeModel = require('../models/employeeModel');
-const emailService = require('../utils/emailService');
-const { calculateTrustScore } = require('../utils/trustScore');
+import EmployeeModel from '../models/employeeModel.js';
+import emailService from '../utils/emailService.js';
+import { calculateTrustScore } from '../utils/trustScore.js';
+import crypto from 'crypto';
 
 class EmployeeController {
 
@@ -14,7 +15,7 @@ class EmployeeController {
             }
 
             const processedEmployees = employees.map(emp => {
-                const token = require('crypto').randomBytes(32).toString('hex');
+                const token = crypto.randomBytes(32).toString('hex');
                 const expiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // 3 days
 
                 return {
@@ -137,4 +138,4 @@ class EmployeeController {
     }
 }
 
-module.exports = new EmployeeController();
+export default new EmployeeController();

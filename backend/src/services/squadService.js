@@ -1,11 +1,13 @@
+import "dotenv/config";
 import axios from "axios";
 
 const SQUAD_BASE_URL = "https://sandbox-api-d.squadco.com";
 const SQUAD_SECRET_KEY = process.env.SQUAD_SECRET_KEY;
 
 if (!SQUAD_SECRET_KEY) {
-  console.warn("SQUAD_SECRET_KEY not set. Squad API calls will fail.");
+  console.error("❌ SQUAD_SECRET_KEY not found in environment variables!");
 }
+
 
 const squadClient = axios.create({
   baseURL: SQUAD_BASE_URL,
@@ -16,30 +18,43 @@ const squadClient = axios.create({
   timeout: 10000,
 });
 
-/**
- * Create a virtual account for a user
- * @param {string} customerName - Customer full name
- * @param {string} email - Customer email
- * @param {string} uniqueRef - Unique reference for idempotency
- * @returns {Promise<Object>} Virtual account details
- */
-export async function createVirtualAccount(customerName, email, uniqueRef) {
+export async function createVirtualAccount({ 
+  customerName, 
+  email, 
+  phone = "08011112222", 
+  organizationId 
+}) {
   try {
-    const response = await squadClient.post("/virtual-account", {
-      customer_name: customerName,
+    const uniqueRef = `ORG-${organizationId}-${Date.now()}`;
+    
+    const payload = {
+      customer_identifier: `ORG-${organizationId}`,
+      first_name: "PayGuard",
+      last_name: customerName,
       email: email,
-      request_ref: uniqueRef,
-    });
+      mobile_num: phone,
+      bvn: "22222222222",
+      dob: "01/01/1980",
+      address: "Federal Secretariat Abuja",
+      gender: "1",
+      beneficiary_account: "0123456789"
+    };
+
+
+
+    const response = await squadClient.post("/virtual-account", payload);
 
     return {
       success: true,
       data: {
-        accountNumber: response.data.data?.account_number,
-        bankName: response.data.data?.bank_name,
+        accountNumber: response.data.data?.virtual_account_number,
+        bankName: response.data.data?.bank_code === "058" ? "GTBank (Squad)" : "Squad Bank",
         bankCode: response.data.data?.bank_code,
-        customerId: response.data.data?.customer_id,
+        customerId: response.data.data?.customer_id || `CUST-${organizationId}`,
       },
     };
+
+
   } catch (error) {
     console.error("Error creating virtual account:", error.response?.data || error.message);
     return {
@@ -48,6 +63,9 @@ export async function createVirtualAccount(customerName, email, uniqueRef) {
     };
   }
 }
+
+
+
 
 /**
  * Verify account name for a given bank account
@@ -90,28 +108,33 @@ export async function verifyAccountName(accountNumber, bankCode) {
  * @param {string} transactionRef - Unique transaction reference
  * @returns {Promise<Object>} Transfer details
  */
-export async function initiateTransfer(
+export async function initiateTransfer({
   amount,
   bankCode,
   accountNumber,
   accountName,
-  transactionRef
-) {
+  transactionRef,
+  remark = "PayGuard AI Payout",
+}) {
   try {
     const response = await squadClient.post("/payout/transfer", {
-      amount: Math.round(amount * 100), // Convert to kobo
+      amount: Math.round(amount), // Already in kobo from controller
       bank_code: bankCode,
       account_number: accountNumber,
       account_name: accountName,
-      transaction_ref: transactionRef,
+      transaction_reference: transactionRef,
+      currency: "NGN",
+      remark: remark,
     });
+
+
 
     return {
       success: true,
       data: {
         transactionId: response.data.data?.transaction_id,
         status: response.data.data?.status,
-        amount: response.data.data?.amount / 100, // Convert back to NGN
+        amount: response.data.data?.amount / 100,
       },
     };
   } catch (error) {
@@ -123,6 +146,7 @@ export async function initiateTransfer(
   }
 }
 
+
 /**
  * Create a Squad sub-account for a government ministry/organization.
  * Each ministry gets their own isolated Squad wallet.
@@ -133,8 +157,9 @@ export async function initiateTransfer(
  */
 export async function createSubAccount(displayName, settlementBank, settlementAccount) {
   try {
-    // Attempt real API, but since Squad sandbox might not support this endpoint, we mock it on 404
-    const response = await squadClient.post("/sub-users/create", {
+    // Attempt real API
+    const response = await squadClient.post("/subaccount", {
+
       display_name: displayName,
       settlement_bank: settlementBank,
       settlement_account: settlementAccount,
@@ -170,9 +195,66 @@ export async function createSubAccount(displayName, settlementBank, settlementAc
   }
 }
 
+/**
+ * Simulate an inbound transfer to a virtual account (Sandbox only)
+ * @param {string} virtualAccountNumber - The account to fund
+ * @param {number} amount - Amount in Naira
+ * @returns {Promise<Object>}
+ */
+export async function simulateVirtualAccountTransaction(virtualAccountNumber, amount) {
+  try {
+    const response = await squadClient.post("/virtual-account/simulate-transaction", {
+      virtual_account_number: virtualAccountNumber,
+      amount: amount.toString(), // Squad expects string amount in Naira for simulation
+    });
+
+    return {
+      success: true,
+      data: response.data.data,
+    };
+  } catch (error) {
+    console.error("Error simulating transaction:", error.response?.data || error.message);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message,
+    };
+  }
+}
+
+/**
+ * Simulate a credit transaction into a virtual account (Sandbox only)
+ * @param {string} virtualAccountNumber - The virtual account to credit
+ * @param {number} amountKobo - Amount in kobo
+ * @returns {Promise<Object>} Result
+ */
+export async function simulateVirtualAccountCredit(virtualAccountNumber, amountKobo) {
+  try {
+    const response = await squadClient.post("/virtual-account/simulate/credit", {
+      virtual_account_number: virtualAccountNumber,
+      amount: amountKobo,
+      narration: "Salary funding - PayGuard AI Demo"
+    });
+
+    return {
+      success: true,
+      data: response.data.data
+    };
+  } catch (error) {
+    console.error("Squad Credit Simulation Failed:", error.response?.data || error.message);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message
+    };
+  }
+}
+
 export default {
   createVirtualAccount,
   verifyAccountName,
   initiateTransfer,
   createSubAccount,
+  simulateVirtualAccountTransaction,
+  simulateVirtualAccountCredit
 };
+
+

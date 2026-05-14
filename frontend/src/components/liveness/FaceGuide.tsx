@@ -1,40 +1,56 @@
 // Feature: liveness-verification
-// FaceGuide — purely presentational SVG oval overlay for face positioning feedback.
-// Renders a centred ellipse over the camera feed.
-// Stroke is green (#22c55e) when faceDetected === true AND faceSize >= 0.2.
-// Stroke is red (#ef4444) for all other prop combinations.
+// FaceGuide — OPay-style portrait oval overlay with glowing animated border.
 
 interface FaceGuideProps {
+  status: string;
   faceDetected: boolean;
-  faceSize: number; // bounding-box width as fraction of frame width (0–1)
 }
 
-export function FaceGuide({ faceDetected, faceSize }: FaceGuideProps) {
-  const isPositioned = faceDetected && faceSize >= 0.2;
-  const strokeColor = isPositioned ? "#22c55e" : "#ef4444";
+export function FaceGuide({ status, faceDetected }: FaceGuideProps) {
+  const strokeColor = faceDetected ? "#16a34a" : "#ef4444";
+  const glowColor = faceDetected ? "rgba(22, 163, 74, 0.6)" : "rgba(239, 68, 68, 0.4)";
+
+  // If we are finished or failed, don't show the guide
+  if (status === 'finished' || status === 'failed' || status === 'completing') return null;
 
   return (
-    <svg
-      aria-hidden="true"
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-      }}
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
-    >
-      <ellipse
-        cx="50"
-        cy="50"
-        rx="30"
-        ry="40"
-        fill="none"
-        stroke={strokeColor}
-        strokeWidth="0.8"
-      />
-    </svg>
+    <div className="absolute inset-0 pointer-events-none z-20">
+      {/* Dim Overlay with Oval Cutout */}
+      <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <defs>
+          <mask id="oval-mask">
+            <rect width="100" height="100" fill="white" />
+            <ellipse cx="50" cy="40" rx="32.5" ry="42" fill="black" />
+          </mask>
+        </defs>
+        <rect width="100" height="100" fill="rgba(15, 23, 42, 0.7)" mask="url(#oval-mask)" />
+        
+        {/* Animated Glowing Border */}
+        <ellipse
+          cx="50"
+          cy="40"
+          rx="32.5"
+          ry="42"
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth="1.5"
+          className={faceDetected ? "animate-pulse-glow" : ""}
+          style={{
+            transition: 'stroke 0.3s ease',
+            filter: faceDetected ? `drop-shadow(0 0 12px ${glowColor})` : 'none'
+          }}
+        />
+      </svg>
+
+      <style>{`
+        @keyframes pulse-glow {
+          0%, 100% { opacity: 1; filter: drop-shadow(0 0 15px rgba(22, 163, 74, 0.9)); }
+          50% { opacity: 0.8; filter: drop-shadow(0 0 5px rgba(22, 163, 74, 0.5)); }
+        }
+        .animate-pulse-glow {
+          animation: pulse-glow 2s infinite ease-in-out;
+        }
+      `}</style>
+    </div>
   );
 }

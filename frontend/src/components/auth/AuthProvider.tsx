@@ -17,8 +17,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const timeoutRef = useRef<any>(null);
 
-  // 30 minutes in milliseconds
-  const INACTIVITY_TIMEOUT = 30 * 60 * 1000;
+  // 10 minutes in milliseconds
+  const INACTIVITY_TIMEOUT = 10 * 60 * 1000;
 
   const resetTimeout = () => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);

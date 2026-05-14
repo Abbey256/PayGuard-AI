@@ -1,7 +1,12 @@
 import PageMeta from "../../components/common/PageMeta";
 import PageBreadCrumb from "../../components/common/PageBreadCrumb";
 import { useState, useEffect, useCallback } from "react";
-import { Loader, RefreshCw, Search, Download } from "lucide-react";
+import { 
+  FileText, Download, Filter, Search, 
+  AlertCircle, CheckCircle, Clock, BarChart2,
+  DollarSign, RefreshCw, Loader
+} from "lucide-react";
+
 import { formatNaira } from "../../utils/format";
 import { supabase } from "../../lib/supabaseClient";
 
@@ -31,6 +36,8 @@ export default function Reports() {
     totalAmountProcessed: 0,
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [walletTransactions, setWalletTransactions] = useState<any[]>([]);
+  const [isLoadingWallet, setIsLoadingWallet] = useState(false);
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date();
     d.setDate(1);
@@ -85,7 +92,25 @@ export default function Reports() {
     }
   }, [dateFrom, dateTo]);
 
+  const loadWalletHistory = async () => {
+    setIsLoadingWallet(true);
+    try {
+      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch(`${apiUrl}/api/payments/transactions`, {
+        headers: { "Authorization": `Bearer ${session?.access_token}` },
+      });
+      const result = await response.json();
+      if (result.success) setWalletTransactions(result.transactions);
+    } catch (err) {
+      console.error("Failed to load wallet history", err);
+    } finally {
+      setIsLoadingWallet(false);
+    }
+  };
+
   useEffect(() => { loadReports(); }, [loadReports]);
+  useEffect(() => { loadWalletHistory(); }, []);
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -219,7 +244,86 @@ export default function Reports() {
             </div>
           )}
         </div>
+        {/* Wallet Transactions Section */}
+        <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900 shadow-sm">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
+                <DollarSign size={20} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 dark:text-white">Wallet Transactions</h2>
+                <p className="text-sm text-gray-500">Audit trail of all funding and disbursement activities</p>
+              </div>
+            </div>
+            <button
+              onClick={loadWalletHistory}
+              className="p-2 text-gray-400 hover:text-blue-600 transition"
+              title="Refresh Transactions"
+            >
+              <RefreshCw size={18} className={isLoadingWallet ? "animate-spin" : ""} />
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-gray-100 dark:border-gray-800">
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Date</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Type</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Amount</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Reason / Narration</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
+                {isLoadingWallet ? (
+                  <tr>
+                    <td colSpan={5} className="py-12 text-center text-gray-400">
+                      <Loader size={20} className="animate-spin mx-auto mb-2" />
+                      Fetching audit trail...
+                    </td>
+                  </tr>
+                ) : walletTransactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="py-12 text-center text-gray-400 italic">
+                      No wallet transactions recorded.
+                    </td>
+                  </tr>
+                ) : (
+                  walletTransactions.map((tx) => (
+                    <tr key={tx.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors">
+                      <td className="py-4 text-sm text-gray-600 dark:text-gray-400">
+                        {new Date(tx.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="py-4">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
+                          tx.action === 'WALLET_FUNDED' ? 'bg-emerald-100 text-emerald-700' : 
+                          tx.action === 'PAYOUT' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {tx.action === 'WALLET_FUNDED' ? 'Inflow' : tx.action === 'PAYOUT' ? 'Outflow' : 'Audit'}
+                        </span>
+                      </td>
+                      <td className={`py-4 text-sm font-bold ${tx.action === 'WALLET_FUNDED' ? 'text-emerald-600' : 'text-gray-900 dark:text-white'}`}>
+                        ₦{(tx.changes?.amount ?? 0).toLocaleString()}
+                      </td>
+                      <td className="py-4 text-sm text-gray-700 dark:text-gray-300">
+                        {tx.changes?.reason || tx.target_staff || '—'}
+                      </td>
+                      <td className="py-4">
+                        <span className="text-[10px] font-mono text-gray-500 uppercase">
+                          {tx.changes?.status || 'Completed'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </>
   );
 }
+

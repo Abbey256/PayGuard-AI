@@ -7,7 +7,10 @@ import {
   processPayment,
   getPaymentStatus,
   simulateFunding,
+  getWalletTransactions,
+  logBalanceView
 } from "../controllers/paymentController.js";
+
 
 const router = Router();
 
@@ -20,5 +23,8 @@ router.post("/batches/:id/approve", approveBatch);
 router.post("/process", processPayment);
 router.get("/status/:id", getPaymentStatus);
 router.post("/simulate-funding", simulateFunding);
+router.get("/transactions", getWalletTransactions);
+router.post("/log-balance-view", logBalanceView);
+
 
 export default router;

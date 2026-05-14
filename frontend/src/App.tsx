@@ -29,17 +29,17 @@ export default function App() {
             <Route path="/verify/:token" element={<VerificationPage />} />
 
             {/* Dashboard Layout (authenticated) */}
-            <Route element={<AppLayout />}>
+            <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
               {/* PayGuard AI Pages */}
               <Route path="/" element={<RootRedirect />} />
-              <Route path="/dashboard" element={<ProtectedRoute><Home /></ProtectedRoute>} />
-              <Route path="/staff" element={<ProtectedRoute><Staff /></ProtectedRoute>} />
-              <Route path="/verify" element={<ProtectedRoute><Verification /></ProtectedRoute>} />
-              <Route path="/payments" element={<ProtectedRoute><Payments /></ProtectedRoute>} />
-              <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
-              <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
-              <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
-              <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
+              <Route path="/dashboard" element={<Home />} />
+              <Route path="/staff" element={<Staff />} />
+              <Route path="/verify" element={<Verification />} />
+              <Route path="/payments" element={<Payments />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/notifications" element={<Notifications />} />
             </Route>
 
             {/* Auth Layout */}

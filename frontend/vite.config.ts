@@ -15,8 +15,21 @@ export default defineConfig({
       },
     }),
   ],
+  server: {
+    host: true, // Exposes dev server to local network (for phone testing)
+    port: 5173,
+    allowedHosts: ["brink-coil-flypaper.ngrok-free.dev", "all"],
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
+  },
   test: {
     globals: true,
     environment: "node",
   },
 });
+

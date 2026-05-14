@@ -1,11 +1,11 @@
 // middleware/uploadCSV.js
-const multer = require('multer');
-const csv = require('csv-parser');
-const fs = require('fs');
+import multer from 'multer';
+import csv from 'csv-parser';
+import fs from 'fs';
 
 const upload = multer({ dest: 'uploads/' });
 
-const uploadCSV = [
+export const uploadCSV = [
     upload.single('file'),
     (req, res, next) => {
         if (!req.file) {
@@ -24,10 +24,10 @@ const uploadCSV = [
                 next();
             })
             .on('error', (error) => {
-                fs.unlinkSync(filePath);
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
                 res.status(400).json({ success: false, message: "CSV parsing error" });
             });
     }
-];
-
-module.exports = { uploadCSV };
+];

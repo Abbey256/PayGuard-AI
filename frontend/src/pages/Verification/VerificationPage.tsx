@@ -35,7 +35,16 @@ export default function VerificationPage() {
 
     async function validate() {
       try {
-        const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+        let apiUrl = import.meta.env.VITE_API_URL || '';
+        if (!apiUrl || apiUrl.startsWith('/')) {
+          apiUrl = window.location.origin;
+        }
+        
+        // Handle Mixed Content: if page is HTTPS, force API to HTTPS 
+        if (window.location.protocol === 'https:' && apiUrl.startsWith('http://') && !apiUrl.includes('localhost')) {
+          apiUrl = apiUrl.replace('http://', 'https://');
+        }
+
         const resp = await fetch(`${apiUrl}/api/verify/${token}`, {
           signal: controller.signal,
         });

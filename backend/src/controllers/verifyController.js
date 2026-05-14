@@ -7,6 +7,7 @@
  */
 
 import { supabase } from "../services/supabaseClient.js";
+import { compareFaces } from "../services/faceMatchService.js";
 
 /**
  * GET /api/verify/:token
@@ -108,7 +109,8 @@ export async function submitVerification(req, res, next) {
         staff (
           first_name,
           last_name,
-          email
+          email,
+          photo_url
         )
       `)
       .eq("token", token)
@@ -119,16 +121,29 @@ export async function submitVerification(req, res, next) {
     }
 
     const { id: verificationId, staff_id: staffId } = verificationRequest;
-    const completedAt = new Date().toISOString();
+    // --- FACE MATCHING STEP ---
+    const adminPhotoUrl = verificationRequest.staff.photo_url;
+    const snapshotBase64 = livenessData?.snapshot;
+    let finalVerdict = verdict;
+    let matchConfidence = null;
+
+    if (verdict === "verified" && snapshotBase64 && adminPhotoUrl) {
+      const matchResult = await compareFaces(snapshotBase64, adminPhotoUrl);
+      matchConfidence = matchResult.confidence;
+      if (!matchResult.match) {
+        finalVerdict = "flagged";
+        console.warn(`Face match failed for ${staffId}. Confidence: ${matchConfidence}%`);
+      }
+    }
 
     // Update verification_requests record.
     const { error: verificationUpdateError } = await supabase
       .from("verification_requests")
       .update({
         liveness_score: trustScore,
-        final_score: trustScore,
-        final_verdict: verdict,
-        challenges_passed: livenessData?.challengesPassedCount ?? 0,
+        final_score: matchConfidence !== null ? matchConfidence : trustScore, // Store match confidence
+        final_verdict: finalVerdict,
+        challenges_passed: livenessData?.challengesPassed ?? 0,
         challenges_total: 3,
         status: "completed",
         completed_at: completedAt,
@@ -139,12 +154,12 @@ export async function submitVerification(req, res, next) {
       throw verificationUpdateError;
     }
 
-    const isVerified = verdict === "verified";
+    const isVerified = finalVerdict === "verified";
     let vAccNum = null;
     let vBankName = null;
 
     if (isVerified) {
-      // Create Worker Virtual Account
+      // Create Worker Virtual Account via Squad
       const { createVirtualAccount } = await import("../services/squadService.js");
       const vAccResult = await createVirtualAccount(
         `${verificationRequest.staff.first_name} ${verificationRequest.staff.last_name}`,
@@ -163,7 +178,7 @@ export async function submitVerification(req, res, next) {
     const { error: staffUpdateError } = await supabase
       .from("staff")
       .update({
-        trust_score: trustScore,
+        trust_score: matchConfidence !== null ? matchConfidence : trustScore,
         status: isVerified ? "verified" : "flagged",
         ...(isVerified && vAccNum ? { virtual_account_number: vAccNum, virtual_account_bank: vBankName } : {})
       })
@@ -173,7 +188,15 @@ export async function submitVerification(req, res, next) {
       throw staffUpdateError;
     }
 
-    return res.status(200).json({ success: true });
+    // Log to audit_logs
+    await supabase.from("audit_logs").insert({
+      action: "LIVENESS_VERIFICATION_SUBMITTED",
+      description: `Liveness & Face Match submitted for staff ${staffId}. Verdict: ${finalVerdict} (Match Confidence: ${matchConfidence}%)`,
+      entity_type: "verification_request",
+      entity_id: verificationId,
+    });
+
+    return res.status(200).json({ success: true, verdict: finalVerdict });
   } catch (error) {
     next(error);
   }
