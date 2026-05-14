@@ -1,393 +1,281 @@
 import PageMeta from "../../components/common/PageMeta";
 import PageBreadCrumb from "../../components/common/PageBreadCrumb";
-import { useState, useRef } from "react";
-import { CheckCircle, Send, Upload } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { CheckCircle, Loader, RefreshCw, AlertTriangle } from "lucide-react";
 import { supabase, createNotification } from "../../lib/supabaseClient";
 
 interface VerificationRequest {
   id: string;
-  staffName: string;
-  employeeId: string;
+  staff_id: string;
+  staff_name: string;
+  employee_id: string;
   email: string;
-  dateRequested: string;
-  status: "pending" | "sent" | "verified";
-  expiresAt: string;
+  created_at: string;
+  status: "pending" | "sent" | "completed";
+  token_expires_at: string | null;
+  photo_url?: string | null;
 }
 
-const mockVerificationData: VerificationRequest[] = [
-  {
-    id: "V001",
-    staffName: "Sarah Johnson",
-    employeeId: "EMP002",
-    email: "sarah.johnson@gov.com",
-    dateRequested: "2024-02-20",
-    status: "pending",
-    expiresAt: "2024-03-01",
-  },
-  {
-    id: "V002",
-    staffName: "Emma Wilson",
-    employeeId: "EMP004",
-    email: "emma.wilson@gov.com",
-    dateRequested: "2024-02-18",
-    status: "sent",
-    expiresAt: "2024-02-28",
-  },
-  {
-    id: "V003",
-    staffName: "David Lee",
-    employeeId: "EMP005",
-    email: "david.lee@gov.com",
-    dateRequested: "2024-02-15",
-    status: "verified",
-    expiresAt: "2025-02-15",
-  },
-];
-
-// Toast notification component
-interface Toast {
-  id: string;
-  message: string;
-  type: "success" | "error";
-}
+// Toast
+interface Toast { id: string; message: string; type: "success" | "error"; }
 
 function Toast({ message, type }: { message: string; type: "success" | "error" }) {
   return (
-    <div
-      className={`fixed bottom-4 right-4 px-6 py-3 rounded-lg text-white font-medium shadow-lg animate-in fade-in slide-in-from-bottom-4 ${
-        type === "success" ? "bg-emerald-600" : "bg-red-600"
-      }`}
-    >
+    <div className={`fixed bottom-4 right-4 px-6 py-3 rounded-lg text-white font-medium shadow-lg ${type === "success" ? "bg-emerald-600" : "bg-red-600"}`}>
       {message}
     </div>
   );
 }
 
 export default function Verification() {
-  const [verificationData, setVerificationData] = useState<VerificationRequest[]>(
-    mockVerificationData
-  );
+  const [verificationData, setVerificationData] = useState<VerificationRequest[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
 
-  // Add toast notification
   const showToast = (message: string, type: "success" | "error" = "success") => {
     const id = Date.now().toString();
     setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3000);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000);
   };
 
-  // Parse CSV file
-  const parseVerificationCSV = (text: string): VerificationRequest[] => {
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return [];
-
-    const rows: VerificationRequest[] = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(",").map((v) => v.trim());
-      if (values.length < 5) continue;
-
-      const row: VerificationRequest = {
-        id: `V${String(Date.now() + i).slice(-3)}`,
-        staffName: values[0] || "Unknown",
-        employeeId: values[1] || "",
-        email: values[2] || "",
-        dateRequested: new Date().toISOString().split("T")[0],
-        status: "pending",
-        expiresAt: values[3] || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      };
-
-      rows.push(row);
-    }
-
-    return rows;
-  };
-
-  // Handle CSV import
-  const handleCSVImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const text = event.target?.result as string;
-        const newRequests = parseVerificationCSV(text);
-        if (newRequests.length === 0) {
-          showToast("No valid records found in CSV", "error");
-          return;
-        }
-        setVerificationData((prev) => [...prev, ...newRequests]);
-        showToast(`${newRequests.length} verification requests imported successfully`);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = "";
-        }
-      } catch (error) {
-        showToast("Error parsing CSV file", "error");
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  // Handle Send Link button
-  const handleSendLink = async (id: string) => {
-    setVerificationData((prev) =>
-      prev.map((v) => {
-        if (v.id === id) {
-          showToast(`Verification link sent to ${v.email}`);
-          (async () => {
-            try {
-              const {
-                data: { user },
-              } = await supabase.auth.getUser();
-              if (user) {
-                await createNotification(user.id, `Verification link sent to ${v.email}`, "info");
-              }
-            } catch (err) {
-              console.error(err);
-            }
-          })();
-          return { ...v, status: "sent" as const };
-        }
-        return v;
-      })
-    );
-  };
-
-  // Handle Resend button
-  const handleResend = async (email: string) => {
-    showToast(`Verification link resent to ${email}`);
+  // -------------------------------------------------------------------------
+  // Load verification requests from Supabase
+  // -------------------------------------------------------------------------
+  const loadVerifications = useCallback(async () => {
+    setIsLoading(true);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        await createNotification(user.id, `Verification link resent to ${email}`, "info");
-      }
+      const { data, error } = await supabase
+        .from("verification_requests")
+        .select(`
+          id,
+          staff_id,
+          status,
+          token_expires_at,
+          created_at,
+          staff ( name, employee_id, email, photo_url )
+        `)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      const mapped: VerificationRequest[] = (data ?? []).map((row: any) => ({
+        id: row.id,
+        staff_id: row.staff_id,
+        staff_name: row.staff?.name ?? "Unknown",
+        employee_id: row.staff?.employee_id ?? "",
+        email: row.staff?.email ?? "",
+        created_at: row.created_at,
+        status: row.status === "completed" ? "completed" : row.status,
+        token_expires_at: row.token_expires_at,
+        photo_url: row.staff?.photo_url,
+      }));
+
+      setVerificationData(mapped);
     } catch (err) {
       console.error(err);
+      showToast("Failed to load verification requests", "error");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { loadVerifications(); }, [loadVerifications]);
+
+  // -------------------------------------------------------------------------
+  // Send verification link for a single request
+  // -------------------------------------------------------------------------
+  const handleSendLink = async (item: VerificationRequest) => {
+    setSendingIds((prev) => new Set(prev).add(item.id));
+    try {
+      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch(`${apiUrl}/api/verification/send`, {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session?.access_token}`
+        },
+        body: JSON.stringify({ staffId: item.staff_id, email: item.email }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.message ?? "Failed to send link");
+      }
+
+      showToast(`Verification link sent to ${item.email}`);
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) await createNotification(user.id, `Verification link sent to ${item.email}`, "info");
+      } catch { /* non-fatal */ }
+
+      await loadVerifications();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to send link", "error");
+    } finally {
+      setSendingIds((prev) => { const s = new Set(prev); s.delete(item.id); return s; });
     }
   };
 
-  // Handle Send All Pending
-  const handleSendAllPending = () => {
-    const pendingCount = verificationData.filter((v) => v.status === "pending")
-      .length;
-
-    if (pendingCount === 0) {
-      showToast("No pending requests to send", "error");
-      return;
-    }
-
-    setVerificationData((prev) =>
-      prev.map((v) => (v.status === "pending" ? { ...v, status: "sent" as const } : v))
-    );
-
-    showToast(
-      `${pendingCount} verification link${pendingCount > 1 ? "s" : ""} sent successfully`
-    );
+  // -------------------------------------------------------------------------
+  // Send all pending
+  // -------------------------------------------------------------------------
+  const handleSendAllPending = async () => {
+    const pending = verificationData.filter((v) => v.status === "pending");
+    if (pending.length === 0) { showToast("No pending requests to send", "error"); return; }
+    for (const item of pending) await handleSendLink(item);
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "verified":
-        return "text-emerald-600 bg-emerald-100";
-      case "sent":
-        return "text-blue-600 bg-blue-100";
-      case "pending":
-        return "text-amber-600 bg-amber-100";
-      default:
-        return "text-gray-600 bg-gray-100";
+      case "completed": return "text-emerald-600 bg-emerald-100";
+      case "sent": return "text-blue-600 bg-blue-100";
+      case "pending": return "text-amber-600 bg-amber-100";
+      default: return "text-gray-600 bg-gray-100";
     }
   };
 
-  // Calculate dynamic stats
+  const getStatusLabel = (status: string) => {
+    if (status === "completed") return "Verified";
+    return status.charAt(0).toUpperCase() + status.slice(1);
+  };
+
   const pendingCount = verificationData.filter((v) => v.status === "pending").length;
   const sentCount = verificationData.filter((v) => v.status === "sent").length;
-  const verifiedCount = verificationData.filter((v) => v.status === "verified").length;
-  const totalCount = verificationData.length;
+  const verifiedCount = verificationData.filter((v) => v.status === "completed").length;
 
   return (
     <>
-      <PageMeta
-        title="Verification Center | PayGuard AI"
-        description="Send and manage staff verification requests"
-      />
+      <PageMeta title="Verification Center | PayGuard AI" description="Send and manage staff verification requests" />
       <PageBreadCrumb pageTitle="Verification Center" />
 
       <div className="space-y-6">
+        {/* Warning Banner */}
+        {verificationData.some(v => !v.photo_url) && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/20 flex items-start gap-3">
+            <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={20} />
+            <div>
+              <h4 className="text-sm font-bold text-amber-900 dark:text-amber-100">
+                {verificationData.filter(v => !v.photo_url).length} staff members have no verification photo
+              </h4>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                They will not be able to complete face matching. Add photos in the Staff Management section before sending verification links.
+              </p>
+            </div>
+          </div>
+        )}
         {/* Stats */}
         <div className="grid gap-4 md:grid-cols-4">
-          <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Pending
-            </p>
-            <p className="text-3xl font-bold text-amber-600">
-              {pendingCount}
-            </p>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Sent
-            </p>
-            <p className="text-3xl font-bold text-blue-600">
-              {sentCount}
-            </p>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Verified
-            </p>
-            <p className="text-3xl font-bold text-emerald-600">
-              {verifiedCount}
-            </p>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Total Requests
-            </p>
-            <p className="text-3xl font-bold text-gray-900 dark:text-white">
-              {totalCount}
-            </p>
-          </div>
+          {[
+            { label: "Pending", value: pendingCount, color: "text-amber-600" },
+            { label: "Sent", value: sentCount, color: "text-blue-600" },
+            { label: "Verified", value: verifiedCount, color: "text-emerald-600" },
+            { label: "Total Requests", value: verificationData.length, color: "text-gray-900 dark:text-white" },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
+              <p className="text-sm text-gray-600 dark:text-gray-400">{label}</p>
+              <p className={`text-3xl font-bold ${color}`}>{value}</p>
+            </div>
+          ))}
         </div>
 
         {/* Verification Table */}
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
-          <div className="border-b border-gray-200 bg-gray-50 p-6 dark:border-gray-700 dark:bg-gray-800">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-              Verification Requests
-            </h3>
+          <div className="border-b border-gray-200 bg-gray-50 p-6 dark:border-gray-700 dark:bg-gray-800 flex justify-between items-center">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Verification Requests</h3>
+            <button onClick={loadVerifications} disabled={isLoading} className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition">
+              <RefreshCw size={18} className={isLoading ? "animate-spin" : ""} />
+            </button>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200 dark:border-gray-700">
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 dark:text-white">
-                    Staff Member
-                  </th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 dark:text-white">
-                    Employee ID
-                  </th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 dark:text-white">
-                    Email
-                  </th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 dark:text-white">
-                    Status
-                  </th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 dark:text-white">
-                    Expires
-                  </th>
-                  <th className="px-6 py-4 text-center text-sm font-semibold text-gray-900 dark:text-white">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {verificationData.map((item) => (
-                  <tr
-                    key={item.id}
-                    className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800"
-                  >
-                    <td className="px-6 py-4">
-                      <div>
-                        <p className="font-medium text-gray-900 dark:text-white">
-                          {item.staffName}
-                        </p>
-                        <p className="text-xs text-gray-600 dark:text-gray-400">
-                          {item.id}
-                        </p>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-gray-900 dark:text-white">
-                      {item.employeeId}
-                    </td>
-                    <td className="px-6 py-4 text-gray-900 dark:text-white">
-                      {item.email}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span
-                        className={`inline-block rounded-full px-3 py-1 text-sm font-medium ${getStatusColor(
-                          item.status
-                        )}`}
-                      >
-                        {item.status.charAt(0).toUpperCase() +
-                          item.status.slice(1)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
-                      {item.expiresAt}
-                    </td>
-                    <td className="px-6 py-4 text-center">
-                      {item.status === "pending" && (
-                        <button
-                          onClick={() => handleSendLink(item.id)}
-                          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 transition"
-                        >
-                          Send Link
-                        </button>
-                      )}
-                      {item.status === "sent" && (
-                        <button 
-                          onClick={() => handleResend(item.email)}
-                          className="text-blue-600 hover:text-blue-700 text-sm font-medium"
-                        >
-                          Resend
-                        </button>
-                      )}
-                      {item.status === "verified" && (
-                        <span className="text-emerald-600 font-medium flex items-center gap-1">
-                          <CheckCircle size={16} />
-                          Verified
-                        </span>
-                      )}
-                    </td>
+          {isLoading ? (
+            <div className="flex items-center justify-center py-16 text-gray-500 dark:text-gray-400">
+              <Loader size={24} className="animate-spin mr-3" />
+              Loading verification requests...
+            </div>
+          ) : verificationData.length === 0 ? (
+            <div className="py-16 text-center text-gray-500 dark:text-gray-400">
+              No verification requests yet. Add staff and send verification links to get started.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    {["Staff Member", "Employee ID", "Email", "Status", "Expires", "Actions"].map((h) => (
+                      <th key={h} className={`px-6 py-4 text-sm font-semibold text-gray-900 dark:text-white ${h === "Actions" ? "text-center" : "text-left"}`}>{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {verificationData.map((item) => (
+                    <tr key={item.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="px-6 py-4">
+                        <p className="font-medium text-gray-900 dark:text-white">{item.staff_name}</p>
+                        <p className="text-xs text-gray-500">{item.id.slice(0, 8)}…</p>
+                      </td>
+                      <td className="px-6 py-4 text-gray-900 dark:text-white">{item.employee_id}</td>
+                      <td className="px-6 py-4 text-gray-900 dark:text-white">{item.email}</td>
+                      <td className="px-6 py-4">
+                        <span className={`inline-block rounded-full px-3 py-1 text-sm font-medium ${getStatusColor(item.status)}`}>
+                          {getStatusLabel(item.status)}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
+                        {item.token_expires_at ? new Date(item.token_expires_at).toLocaleDateString() : "—"}
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        {item.status === "pending" && (
+                          <button
+                            onClick={() => handleSendLink(item)}
+                            disabled={sendingIds.has(item.id)}
+                            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 transition disabled:opacity-50 flex items-center gap-1 mx-auto"
+                          >
+                            {sendingIds.has(item.id) && <Loader size={14} className="animate-spin" />}
+                            Send Link
+                          </button>
+                        )}
+                        {item.status === "sent" && (
+                          <button
+                            onClick={() => handleSendLink(item)}
+                            disabled={sendingIds.has(item.id)}
+                            className="text-blue-600 hover:text-blue-700 text-sm font-medium disabled:opacity-50"
+                          >
+                            {sendingIds.has(item.id) ? "Sending…" : "Resend"}
+                          </button>
+                        )}
+                        {item.status === "completed" && (
+                          <span className="text-emerald-600 font-medium flex items-center gap-1 justify-center">
+                            <CheckCircle size={16} />
+                            Verified
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Batch Operations */}
         <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-          <h3 className="mb-4 text-lg font-semibold text-gray-900 dark:text-white">
-            Batch Operations
-          </h3>
+          <h3 className="mb-4 text-lg font-semibold text-gray-900 dark:text-white">Batch Operations</h3>
           <div className="flex gap-3">
-            <button 
+            <button
               onClick={handleSendAllPending}
-              className="rounded-lg bg-emerald-600 px-6 py-2 text-white hover:bg-emerald-700 transition flex items-center gap-2"
+              disabled={pendingCount === 0}
+              className="rounded-lg bg-emerald-600 px-6 py-2 text-white hover:bg-emerald-700 transition flex items-center gap-2 disabled:opacity-50"
             >
-              <Send size={20} />
-              Send All Pending
+              Send All Pending ({pendingCount})
             </button>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="rounded-lg border border-gray-300 px-6 py-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800 transition flex items-center gap-2"
-            >
-              <Upload size={20} />
-              Import Requests
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv"
-              onChange={handleCSVImport}
-              className="hidden"
-            />
           </div>
         </div>
-
-        {/* Toast Notifications */}
-        {toasts.map((toast) => (
-          <Toast key={toast.id} message={toast.message} type={toast.type} />
-        ))}
       </div>
+
+      {toasts.map((toast) => (<Toast key={toast.id} message={toast.message} type={toast.type} />))}
     </>
   );
 }

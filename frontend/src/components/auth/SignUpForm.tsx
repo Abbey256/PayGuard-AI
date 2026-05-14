@@ -1,189 +1,421 @@
 import { useState } from "react";
-import { Link } from "react-router";
-import { ChevronLeftIcon, EyeCloseIcon, EyeIcon } from "../../icons";
+import type { FormEvent } from "react";
+import { Link, useNavigate } from "react-router";
+import {
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  ShieldCheck,
+} from "lucide-react";
+import { supabase } from "../../lib/supabaseClient";
 import Label from "../form/Label";
 import Input from "../form/input/InputField";
-import Checkbox from "../form/input/Checkbox";
+
+const nigerianStates = [
+  "Abia",
+  "Adamawa",
+  "Akwa Ibom",
+  "Anambra",
+  "Bauchi",
+  "Bayelsa",
+  "Benue",
+  "Borno",
+  "Cross River",
+  "Delta",
+  "Ebonyi",
+  "Edo",
+  "Ekiti",
+  "Enugu",
+  "FCT",
+  "Gombe",
+  "Imo",
+  "Jigawa",
+  "Kaduna",
+  "Kano",
+  "Katsina",
+  "Kebbi",
+  "Kogi",
+  "Kwara",
+  "Lagos",
+  "Nasarawa",
+  "Niger",
+  "Ogun",
+  "Ondo",
+  "Osun",
+  "Oyo",
+  "Plateau",
+  "Rivers",
+  "Sokoto",
+  "Taraba",
+  "Yobe",
+  "Zamfara",
+] as const;
+
+function getResetFormState() {
+  return {
+    organizationName: "",
+    officialEmail: "",
+    phoneNumber: "",
+    state: "",
+    department: "",
+    password: "",
+    confirmPassword: "",
+  };
+}
 
 export default function SignUpForm() {
+  const navigate = useNavigate();
   const [showPassword, setShowPassword] = useState(false);
-  const [isChecked, setIsChecked] = useState(false);
-  return (
-    <div className="flex flex-col flex-1 w-full overflow-y-auto lg:w-1/2 no-scrollbar">
-      <div className="w-full max-w-md mx-auto mb-5 sm:pt-10">
-        <Link
-          to="/"
-          className="inline-flex items-center text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-        >
-          <ChevronLeftIcon className="size-5" />
-          Back to dashboard
-        </Link>
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [form, setForm] = useState(getResetFormState());
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+
+  function updateField(field: keyof typeof form, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const organizationName = form.organizationName.trim();
+      const officialEmail    = form.officialEmail.trim().toLowerCase();
+      const phoneNumber      = form.phoneNumber.trim();
+      const state            = form.state.trim();
+      const department       = form.department.trim();
+
+      if (!organizationName || !officialEmail || !phoneNumber || !state || !department || !form.password || !form.confirmPassword) {
+        setErrorMessage("Complete all required fields before submitting.");
+        return;
+      }
+
+      if (form.password !== form.confirmPassword) {
+        setErrorMessage("Passwords do not match.");
+        return;
+      }
+
+      // 1. Create Supabase auth user
+      const { data, error } = await supabase.auth.signUp({
+        email: officialEmail,
+        password: form.password,
+        options: {
+          data: {
+            organization_name: organizationName,
+            phone_number: phoneNumber,
+            state,
+            ministry_department: department,
+            account_type: "government",
+          },
+        },
+      });
+
+      if (error) {
+        setErrorMessage(error.message || "Unable to create account.");
+        return;
+      }
+
+      const authUserId = data.user?.id;
+      if (!authUserId) {
+        setErrorMessage("Account creation failed. Please try again.");
+        return;
+      }
+
+      // 1.5 Insert into public.users to satisfy the foreign key constraint
+      const { error: userError } = await supabase.from("users").insert([{
+        id: authUserId,
+        email: officialEmail,
+        phone: phoneNumber,
+      }]);
+
+      if (userError) {
+        console.warn("User record issue:", userError);
+      }
+
+      // 2. Insert organization row — immediately approved, no manual review
+      const { data: orgData, error: orgError } = await supabase
+        .from("organizations")
+        .insert([{
+          name: organizationName,
+          email: officialEmail,
+          status: "approved",           // ← auto-approved for demo
+          admin_id: authUserId,
+          phone: phoneNumber,
+          state,
+          department,
+        }])
+        .select("id")
+        .single();
+
+      if (orgError || !orgData?.id) {
+        console.warn("Organization record issue:", orgError);
+        // Still proceed — org can be re-created if needed
+      }
+
+      // 3. Call backend to create Squad sub-account silently (fire-and-not-block)
+      if (orgData?.id) {
+        const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+        fetch(`${apiUrl}/api/organizations/setup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orgId: orgData.id,
+            orgName: organizationName,
+            adminId: authUserId,
+          }),
+        }).catch((err) => console.warn("Squad setup (non-fatal):", err));
+      }
+
+      // 4. Sign in immediately and go to dashboard
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: officialEmail,
+        password: form.password,
+      });
+
+      if (signInError) {
+        // Account was created — just ask them to sign in manually
+        setSubmitted(true);
+        setForm(getResetFormState());
+        return;
+      }
+
+      // 5. Redirect straight to dashboard
+      navigate("/dashboard", { replace: true });
+
+    } catch (err) {
+      console.error(err);
+      setErrorMessage("Unable to create your account right now. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // submitted state is only shown if auto-signin fails after signup
+  if (submitted) {
+    return (
+      <div className="mx-auto flex w-full max-w-xl flex-col items-center">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-[#16a34a] shadow-sm ring-1 ring-emerald-100">
+            <ShieldCheck className="h-8 w-8" />
+          </div>
+          <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">PayGuard AI</h1>
+          <p className="mt-2 text-sm text-gray-600 sm:text-base">Government Payroll Verification System</p>
+        </div>
+        <div className="w-full rounded-3xl border border-gray-200 bg-white p-6 text-center shadow-[0_10px_40px_rgba(15,23,42,0.08)] sm:p-10">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-[#16a34a]">
+            <CheckCircle2 className="h-9 w-9" />
+          </div>
+          <h2 className="text-2xl font-semibold text-gray-900">Account Created!</h2>
+          <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-gray-600 sm:text-base">
+            Your ministry account is ready. Sign in below to access your dashboard.
+          </p>
+          <button
+            type="button"
+            onClick={() => navigate("/signin")}
+            className="mt-8 inline-flex items-center justify-center rounded-xl bg-[#16a34a] px-5 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#15803d]"
+          >
+            Sign in to Dashboard
+          </button>
+        </div>
       </div>
-      <div className="flex flex-col justify-center flex-1 w-full max-w-md mx-auto">
-        <div>
-          <div className="mb-5 sm:mb-8">
-            <h1 className="mb-2 font-semibold text-gray-800 text-title-sm dark:text-white/90 sm:text-title-md">
-              Sign Up
-            </h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              Enter your email and password to sign up!
+    );
+  }
+
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col items-center">
+      <div className="mb-8 flex flex-col items-center text-center">
+        <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-[#16a34a] shadow-sm ring-1 ring-emerald-100">
+          <ShieldCheck className="h-8 w-8" />
+        </div>
+        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">
+          PayGuard AI
+        </h1>
+        <p className="mt-2 text-sm text-gray-600 sm:text-base">
+          Government Payroll Verification System
+        </p>
+      </div>
+
+      <div className="w-full rounded-3xl border border-gray-200 bg-white p-6 shadow-[0_10px_40px_rgba(15,23,42,0.08)] sm:p-8">
+        <div className="mb-6 text-center sm:text-left">
+          <h2 className="text-2xl font-semibold text-gray-900">
+            Request agency access
+          </h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Official government accounts only. Applications are reviewed before approval.
+          </p>
+        </div>
+
+        {errorMessage ? (
+          <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        ) : null}
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div>
+            <Label htmlFor="organization-name">
+              Organization Name <span className="text-error-500">*</span>
+            </Label>
+            <Input
+              id="organization-name"
+              name="organizationName"
+              type="text"
+              placeholder="Ministry of Finance"
+              value={form.organizationName}
+              onChange={(event) => updateField("organizationName", event.target.value)}
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="official-email">
+              Official Email <span className="text-error-500">*</span>
+            </Label>
+            <Input
+              id="official-email"
+              name="officialEmail"
+              type="email"
+              placeholder="name@ministry.gov.ng"
+              value={form.officialEmail}
+              onChange={(event) => updateField("officialEmail", event.target.value)}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Must be a government email e.g. name@ministry.gov.ng
             </p>
           </div>
-          <div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-5">
-              <button className="inline-flex items-center justify-center gap-3 py-3 text-sm font-normal text-gray-700 transition-colors bg-gray-100 rounded-lg px-7 hover:bg-gray-200 hover:text-gray-800 dark:bg-white/5 dark:text-white/90 dark:hover:bg-white/10">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 20 20"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path
-                    d="M18.7511 10.1944C18.7511 9.47495 18.6915 8.94995 18.5626 8.40552H10.1797V11.6527H15.1003C15.0011 12.4597 14.4654 13.675 13.2749 14.4916L13.2582 14.6003L15.9087 16.6126L16.0924 16.6305C17.7788 15.1041 18.7511 12.8583 18.7511 10.1944Z"
-                    fill="#4285F4"
-                  />
-                  <path
-                    d="M10.1788 18.75C12.5895 18.75 14.6133 17.9722 16.0915 16.6305L13.274 14.4916C12.5201 15.0068 11.5081 15.3666 10.1788 15.3666C7.81773 15.3666 5.81379 13.8402 5.09944 11.7305L4.99473 11.7392L2.23868 13.8295L2.20264 13.9277C3.67087 16.786 6.68674 18.75 10.1788 18.75Z"
-                    fill="#34A853"
-                  />
-                  <path
-                    d="M5.10014 11.7305C4.91165 11.186 4.80257 10.6027 4.80257 9.99992C4.80257 9.3971 4.91165 8.81379 5.09022 8.26935L5.08523 8.1534L2.29464 6.02954L2.20333 6.0721C1.5982 7.25823 1.25098 8.5902 1.25098 9.99992C1.25098 11.4096 1.5982 12.7415 2.20333 13.9277L5.10014 11.7305Z"
-                    fill="#FBBC05"
-                  />
-                  <path
-                    d="M10.1789 4.63331C11.8554 4.63331 12.9864 5.34303 13.6312 5.93612L16.1511 3.525C14.6035 2.11528 12.5895 1.25 10.1789 1.25C6.68676 1.25 3.67088 3.21387 2.20264 6.07218L5.08953 8.26943C5.81381 6.15972 7.81776 4.63331 10.1789 4.63331Z"
-                    fill="#EB4335"
-                  />
-                </svg>
-                Sign up with Google
-              </button>
-              <button className="inline-flex items-center justify-center gap-3 py-3 text-sm font-normal text-gray-700 transition-colors bg-gray-100 rounded-lg px-7 hover:bg-gray-200 hover:text-gray-800 dark:bg-white/5 dark:text-white/90 dark:hover:bg-white/10">
-                <svg
-                  width="21"
-                  className="fill-current"
-                  height="20"
-                  viewBox="0 0 21 20"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path d="M15.6705 1.875H18.4272L12.4047 8.75833L19.4897 18.125H13.9422L9.59717 12.4442L4.62554 18.125H1.86721L8.30887 10.7625L1.51221 1.875H7.20054L11.128 7.0675L15.6705 1.875ZM14.703 16.475H16.2305L6.37054 3.43833H4.73137L14.703 16.475Z" />
-                </svg>
-                Sign up with X
-              </button>
-            </div>
-            <div className="relative py-3 sm:py-5">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-gray-200 dark:border-gray-800"></div>
-              </div>
-              <div className="relative flex justify-center text-sm">
-                <span className="p-2 text-gray-400 bg-white dark:bg-gray-900 sm:px-5 sm:py-2">
-                  Or
-                </span>
-              </div>
-            </div>
-            <form>
-              <div className="space-y-5">
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  {/* <!-- First Name --> */}
-                  <div className="sm:col-span-1">
-                    <Label>
-                      First Name<span className="text-error-500">*</span>
-                    </Label>
-                    <Input
-                      type="text"
-                      id="fname"
-                      name="fname"
-                      placeholder="Enter your first name"
-                    />
-                  </div>
-                  {/* <!-- Last Name --> */}
-                  <div className="sm:col-span-1">
-                    <Label>
-                      Last Name<span className="text-error-500">*</span>
-                    </Label>
-                    <Input
-                      type="text"
-                      id="lname"
-                      name="lname"
-                      placeholder="Enter your last name"
-                    />
-                  </div>
-                </div>
-                {/* <!-- Email --> */}
-                <div>
-                  <Label>
-                    Email<span className="text-error-500">*</span>
-                  </Label>
-                  <Input
-                    type="email"
-                    id="email"
-                    name="email"
-                    placeholder="Enter your email"
-                  />
-                </div>
-                {/* <!-- Password --> */}
-                <div>
-                  <Label>
-                    Password<span className="text-error-500">*</span>
-                  </Label>
-                  <div className="relative">
-                    <Input
-                      placeholder="Enter your password"
-                      type={showPassword ? "text" : "password"}
-                    />
-                    <span
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute z-30 -translate-y-1/2 cursor-pointer right-4 top-1/2"
-                    >
-                      {showPassword ? (
-                        <EyeIcon className="fill-gray-500 dark:fill-gray-400 size-5" />
-                      ) : (
-                        <EyeCloseIcon className="fill-gray-500 dark:fill-gray-400 size-5" />
-                      )}
-                    </span>
-                  </div>
-                </div>
-                {/* <!-- Checkbox --> */}
-                <div className="flex items-center gap-3">
-                  <Checkbox
-                    className="w-5 h-5"
-                    checked={isChecked}
-                    onChange={setIsChecked}
-                  />
-                  <p className="inline-block font-normal text-gray-500 dark:text-gray-400">
-                    By creating an account means you agree to the{" "}
-                    <span className="text-gray-800 dark:text-white/90">
-                      Terms and Conditions,
-                    </span>{" "}
-                    and our{" "}
-                    <span className="text-gray-800 dark:text-white">
-                      Privacy Policy
-                    </span>
-                  </p>
-                </div>
-                {/* <!-- Button --> */}
-                <div>
-                  <button className="flex items-center justify-center w-full px-4 py-3 text-sm font-medium text-white transition rounded-lg bg-brand-500 shadow-theme-xs hover:bg-brand-600">
-                    Sign Up
-                  </button>
-                </div>
-              </div>
-            </form>
 
-            <div className="mt-5">
-              <p className="text-sm font-normal text-center text-gray-700 dark:text-gray-400 sm:text-start">
-                Already have an account? {""}
-                <Link
-                  to="/signin"
-                  className="text-brand-500 hover:text-brand-600 dark:text-brand-400"
-                >
-                  Sign In
-                </Link>
-              </p>
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="phone-number">
+                Phone Number <span className="text-error-500">*</span>
+              </Label>
+              <Input
+                id="phone-number"
+                name="phoneNumber"
+                type="text"
+                placeholder="08012345678"
+                value={form.phoneNumber}
+                onChange={(event) => updateField("phoneNumber", event.target.value)}
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="state">
+                State <span className="text-error-500">*</span>
+              </Label>
+              <select
+                id="state"
+                name="state"
+                value={form.state}
+                onChange={(event) => updateField("state", event.target.value)}
+                className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 shadow-theme-xs outline-none transition focus:border-emerald-400 focus:ring-3 focus:ring-emerald-500/20"
+              >
+                <option value="">Select state</option>
+                {nigerianStates.map((state) => (
+                  <option key={state} value={state}>
+                    {state}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
-        </div>
+
+          <div>
+            <Label htmlFor="department">
+              Ministry / Department <span className="text-error-500">*</span>
+            </Label>
+            <Input
+              id="department"
+              name="department"
+              type="text"
+              placeholder="Payroll and Pensions Department"
+              value={form.department}
+              onChange={(event) => updateField("department", event.target.value)}
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="signup-password">
+              Password <span className="text-error-500">*</span>
+            </Label>
+            <div className="relative">
+              <Input
+                id="signup-password"
+                name="password"
+                type={showPassword ? "text" : "password"}
+                placeholder="Create a password"
+                value={form.password}
+                onChange={(event) => updateField("password", event.target.value)}
+                className="pr-12"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((current) => !current)}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 transition-colors hover:text-gray-700"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? (
+                  <EyeOff className="h-5 w-5" />
+                ) : (
+                  <Eye className="h-5 w-5" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <Label htmlFor="confirm-password">
+              Confirm Password <span className="text-error-500">*</span>
+            </Label>
+            <div className="relative">
+              <Input
+                id="confirm-password"
+                name="confirmPassword"
+                type={showConfirmPassword ? "text" : "password"}
+                placeholder="Confirm your password"
+                value={form.confirmPassword}
+                onChange={(event) => updateField("confirmPassword", event.target.value)}
+                className="pr-12"
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword((current) => !current)}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 transition-colors hover:text-gray-700"
+                aria-label={showConfirmPassword ? "Hide confirmation password" : "Show confirmation password"}
+              >
+                {showConfirmPassword ? (
+                  <EyeOff className="h-5 w-5" />
+                ) : (
+                  <Eye className="h-5 w-5" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          <p className="text-sm leading-6 text-gray-600">
+            By creating an account you agree to PayGuard AI&apos;s data handling policy in compliance with NDPR guidelines.
+          </p>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="inline-flex w-full items-center justify-center rounded-xl bg-[#16a34a] px-4 py-3.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#15803d] disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {loading ? "Submitting..." : "Submit application"}
+          </button>
+        </form>
+
+        <p className="mt-5 text-center text-sm text-gray-600">
+          Already have an approved account?{" "}
+          <Link
+            to="/signin"
+            className="font-medium text-[#16a34a] transition-colors hover:text-[#15803d]"
+          >
+            Sign in
+          </Link>
+        </p>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Dropdown } from "../ui/dropdown/Dropdown";
 import { DropdownItem } from "../ui/dropdown/DropdownItem";
 import { Link } from "react-router";
+import { Info, CheckCircle, AlertTriangle } from "lucide-react";
 import { supabase, fetchNotifications } from "../../lib/supabaseClient";
 
 export default function NotificationDropdown() {
@@ -24,6 +25,8 @@ export default function NotificationDropdown() {
 
   useEffect(() => {
     let mounted = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
     async function load() {
       try {
         const {
@@ -37,29 +40,34 @@ export default function NotificationDropdown() {
           setUnreadCount((items as any[]).filter((i) => !i.is_read).length);
         }
 
-        // subscribe to realtime notifications for this user
-        const channel = supabase
-          .channel("public:notifications")
-          .on(
-            "postgres_changes",
-            { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` },
-            (payload) => {
-              setNotifications((prev) => [payload.new, ...prev].slice(0, 10));
-              setUnreadCount((prev) => prev + 1);
-            }
-          )
-          .subscribe();
-
-        return () => {
-          mounted = false;
-          channel.unsubscribe();
-        };
+        // Set up the realtime listener before subscribing. Use a unique name for StrictMode.
+        channel = supabase.channel(`public:notifications:${Date.now()}`);
+        channel.on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${user.id}`,
+          },
+          (payload) => {
+            setNotifications((prev) => [payload.new, ...prev].slice(0, 10));
+            setUnreadCount((prev) => prev + 1);
+          }
+        );
+        channel.subscribe();
       } catch (err) {
         console.error(err);
       }
     }
 
     load();
+    return () => {
+      mounted = false;
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   }, []);
 
   const markAsRead = async (id: string) => {
@@ -78,9 +86,8 @@ export default function NotificationDropdown() {
         onClick={handleClick}
       >
         <span
-          className={`absolute right-0 top-0.5 z-10 h-2 w-2 rounded-full bg-orange-400 ${
-            unreadCount === 0 ? "hidden" : "flex"
-          }`}
+          className={`absolute right-0 top-0.5 z-10 h-2 w-2 rounded-full bg-orange-400 ${unreadCount === 0 ? "hidden" : "flex"
+            }`}
         >
           <span className="absolute inline-flex w-full h-full bg-orange-400 rounded-full opacity-75 animate-ping"></span>
         </span>
@@ -139,19 +146,17 @@ export default function NotificationDropdown() {
                     await markAsRead(n.id);
                     closeDropdown();
                   }}
-                  className={`flex gap-3 rounded-lg border-b border-gray-100 p-3 px-4.5 py-3 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-white/5 ${
-                    n.is_read ? "" : "bg-white/5"
-                  }`}
+                  className={`flex gap-3 rounded-lg border-b border-gray-100 p-3 px-4.5 py-3 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-white/5 ${n.is_read ? "" : "bg-white/5"
+                    }`}
                 >
-                  <span className="relative block w-full h-10 rounded-full z-1 max-w-10">
-                    <img
-                      width={40}
-                      height={40}
-                      src="/images/user/user-02.jpg"
-                      alt="User"
-                      className="w-full overflow-hidden rounded-full"
-                    />
-                  </span>
+                  <div className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${n.type === 'error' ? 'bg-red-100 text-red-600' :
+                      n.type === 'success' ? 'bg-emerald-100 text-emerald-600' :
+                        'bg-blue-100 text-blue-600'
+                    }`}>
+                    {n.type === 'error' ? <AlertTriangle size={20} /> :
+                      n.type === 'success' ? <CheckCircle size={20} /> :
+                        <Info size={20} />}
+                  </div>
 
                   <span className="block flex-1">
                     <span className="mb-1.5 block  text-theme-sm text-gray-500 dark:text-gray-400 space-x-1">
@@ -171,8 +176,9 @@ export default function NotificationDropdown() {
           )}
         </ul>
         <Link
-          to="/"
-          className="block px-4 py-2 mt-3 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700"
+          to="/notifications"
+          onClick={closeDropdown}
+          className="block px-4 py-2 mt-3 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700 transition"
         >
           View All Notifications
         </Link>

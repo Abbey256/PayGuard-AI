@@ -1,104 +1,217 @@
 # PayGuard AI
 
-**The proof-of-life payroll verification layer for national workforce integrity.**
+> **Verify once. Pay with confidence.**
 
-Built for **Squad Hackathon 3.0** by **Team Reacha**.
+The proof-of-life payroll verification layer built to eliminate 
+ghost workers from Nigerian government payroll.
 
-## Overview
+Built for **Squad Hackathon 3.0 — Challenge 01: Proof of Life**  
+by **Team Reacha**
 
-PayGuard AI is a zero-trust payroll verification system designed to reduce ghost-worker fraud by requiring live biometric proof before salary disbursement. It bridges legacy payroll records with Squad-powered payment orchestration so funds are only released after a worker is verified as present and real.
+---
 
-## Problem
+## The Problem
 
-Payroll systems can confirm that a person is scheduled to be paid, but they often cannot confirm that the person is physically present, authenticated, and eligible at the moment of payment. That gap creates fraud risk, weak audit trails, and unnecessary leakage of public funds.
+Nigeria loses an estimated ₦200 billion annually to ghost workers.
+IPPIS and existing payroll systems verify workers once at enrollment 
+— never again at the moment of payment.
 
-## Solution
+That gap is where billions disappear.
 
-PayGuard AI combines AI-assisted liveness detection with Squad API-based escrow and transfer workflows. Salaries can be held in virtual accounts, verified through biometric checks, and released only when the payroll identity and account details match the approval rules.
+PayGuard AI closes it.
 
-## Core Capabilities
+---
 
-### Biometric Liveness Verification
-- Uses client-side MediaPipe Face Mesh for real-time liveness checks.
-- Supports challenge-response flows such as blink, head movement, and smile prompts.
-- Reduces the risk of photo replay and prerecorded video spoofing.
+## What We Built
 
-### Secure Payment Orchestration
-- Integrates with Squad API flows for virtual account creation and transfers.
-- Supports account-name verification before funds are released.
-- Keeps the payment process auditable and controlled.
+A zero-trust biometric verification system that requires live 
+AI-confirmed proof of life before every salary disbursement.
 
-### Trust Scoring and Audit Flags
-- Applies a trust score to each verification event.
-- Flags suspicious sessions for review based on biometric confidence and identity mismatch signals.
-- Generates an audit-friendly trail for compliance and fraud response.
+No verification. No payment. No exceptions.
+
+---
+
+## How It Works
+
+1. HR uploads monthly payroll CSV + staff reference photos
+2. System generates unique verification link per worker
+3. Worker opens link on any phone — no app download needed
+4. MediaPipe AI runs liveness challenges (blink, head turn, smile)
+5. Trust score calculated from biometric signals
+6. Squad API releases salary only to verified workers
+7. Full audit trail generated automatically with biometric evidence
+
+---
+
+## Squad API Integration
+
+Squad is the payment gate our AI controls — not decoration.
+
+| API | Purpose |
+|-----|---------|
+| Sub-account Creation | Each ministry gets isolated Squad wallet |
+| Virtual Account Creation | Auto-created per verified worker |
+| Account Name Verification | Name must match payroll before transfer |
+| Payout Transfer | Triggered by AI trust score — not human approval |
+
+---
+
+## AI Architecture
+
+**Layer 1 — Liveness (MediaPipe Face Mesh)**
+- 468 3D facial landmarks tracked in real time
+- Randomized challenge sequence per session
+- Static face detection, multiple face detection, 
+  virtual camera detection
+
+**Layer 2 — Identity (face-api.js)**
+- Mathematical face comparison against reference photo
+- Runs entirely in browser — no biometric data leaves device
+- Only numerical confidence scores transmitted to backend
+
+**Layer 3 — Trust Score Engine**
+- Liveness result: 35%
+- Face match confidence: 35%
+- Challenge completion: 20%
+- Session behavior: 10%
+- Score ≥ 90 → verified | Score < 90 → flagged
+
+---
 
 ## Technology Stack
 
-- **Frontend:** React, TypeScript, Vite, Tailwind CSS, Lucide React
-- **Biometrics:** MediaPipe Face Mesh
-- **Backend:** Node.js, Express, Prisma, PostgreSQL
-- **Payments:** Squad API
-- **State Management:** Zustand-ready structure
-- **Animation Layer:** Framer Motion-ready UI patterns
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React, TypeScript, Vite, Tailwind CSS, Lucide React |
+| Biometrics | MediaPipe Face Mesh, face-api.js |
+| Backend | Node.js, Express |
+| Database | Supabase (PostgreSQL + Auth + Storage + Realtime) |
+| Payments | Squad API (Sandbox) |
+| Hosting | Vercel (frontend), Railway (backend) |
+
+---
 
 ## Repository Structure
-
-```text
 payguard-ai/
-├── frontend/                # React (Vite) application
-│   ├── src/components       # UI, navigation, liveness scanner
-│   ├── src/hooks           # Client-side state and liveness logic
-│   ├── src/pages           # Dashboard and workflow screens
-│   └── src/services        # API calling layer
-├── backend/                 # Node.js + Express API
-│   ├── src/controllers      # Payroll, verification, payout handlers
-│   ├── src/middleware       # Auth, security, error handling
-│   ├── src/routes           # REST endpoints
-│   ├── src/services         # Squad integration and trust logic
-│   └── src/models           # Prisma schema and persistence layer
-├── shared/                  # Shared types and constants
-├── docs/                    # PRD, architecture, and API docs
-└── docker-compose.yml       # Local infrastructure support
-```
+├── frontend/
+│   ├── src/components/
+│   │   ├── liveness/       # LivenessScanner, FaceGuide
+│   │   ├── dashboard/      # HR admin components
+│   │   └── ui/             # Shared UI components
+│   ├── src/pages/
+│   │   ├── Dashboard.tsx
+│   │   ├── StaffManagement.tsx
+│   │   ├── VerificationCenter.tsx
+│   │   ├── PaymentBatches.tsx
+│   │   ├── Reports.tsx
+│   │   └── verify/[token].tsx  # Worker-facing verification
+│   └── src/services/       # Supabase + API clients
+├── backend/
+│   ├── src/controllers/    # Auth, staff, verify, payments
+│   ├── src/routes/         # REST endpoints
+│   ├── src/services/
+│   │   ├── squadService.js # All Squad API calls
+│   │   └── trustScore.js   # Trust score algorithm
+│   └── src/middleware/     # Auth, rate limiting, errors
+├── ai/
+│   ├── liveness/           # MediaPipe implementation
+│   ├── facematch/          # face-api.js integration
+│   └── trustScore/         # Scoring algorithm
+└── docs/
+├── PRD.md
+└── architecture.md
+
+---
 
 ## Getting Started
 
 ### Prerequisites
+- Node.js 18+
+- Supabase account (free tier works)
+- Squad sandbox credentials from sandbox.squadco.com
 
-- Node.js 18 or newer
-- PostgreSQL, locally or via Docker
-- Squad sandbox credentials
+### Environment Variables
 
-### Setup
+**Frontend** (`frontend/.env`):
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+VITE_API_URL=http://localhost:3000
+
+**Backend** (`backend/.env`):
+PORT=3000
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_KEY=your_supabase_service_key
+SQUAD_SECRET_KEY=your_squad_secret_key
+SQUAD_BASE_URL=https://sandbox-api-d.squadco.com
+FRONTEND_URL=http://localhost:5174
+
+### Installation
 
 ```bash
 git clone https://github.com/Abbey256/payguard-ai.git
 cd payguard-ai
-npm install
+
+# Install frontend
+cd frontend && npm install
+
+# Install backend  
+cd ../backend && npm install
+
+# Run both
+cd frontend && npm run dev
+cd backend && npm run dev
 ```
 
-Create the required environment files from the template and configure your local secrets before running the app.
-
-```bash
-npm run dev
-```
+---
 
 ## Security and Compliance
 
-- **Zero-trust by design:** no hardcoded secrets in source control.
-- **NDPR-aware data handling:** raw biometric images should not be stored; only derived verification artifacts should be retained where necessary.
-- **Device-aware verification:** sessions can be tied to hardware and browser context to reduce proxy scanning risk.
-- **Auditability:** failed or blocked transactions should be logged for review and governance workflows.
+- Zero-trust: no hardcoded secrets in source control
+- NDPR compliant: no raw biometric data stored — 
+  only numerical confidence scores
+- Dual authorization: no single officer can override 
+  AI payment decision alone
+- Immutable audit trail: every verification and payment 
+  logged with timestamp and biometric reference
+- Squad key isolation: secret key lives only in backend 
+  environment — never exposed to browser
+
+---
+
+## Demo Flow
+
+To run a complete end-to-end demo:
+
+1. Sign up with any email (email confirmation disabled in sandbox)
+2. Upload the sample CSV from `/docs/sample-payroll.csv`
+3. Upload sample photos from `/docs/sample-photos.zip`
+4. Send verification link to a test worker email
+5. Open the link on a phone and complete liveness verification
+6. Return to dashboard — worker should show as verified
+7. Approve payment batch — Squad sandbox transfer executes
+
+Sample credentials for judges:
+HR Login: demo@ministry.gov.ng
+Password: PayGuard2026!
+
+---
 
 ## Team Reacha
 
-- **Abiodun Olabisi** — Frontend, AI architecture, and UI design
-- **Najib Adebisi** — Backend, Squad API integration, and database security
+**Abiodun Olabisi** — Frontend, AI architecture, UI design  
+Self-taught engineer. Zoology background. 
+Built the liveness verification system and HR dashboard.
 
-## Status
+**Najib Adebisi** — Backend, Squad API integration, 
+database security and payment orchestration.
 
-This repository is being shaped for the Squad Hackathon 3.0 submission and will continue to evolve toward a production-ready government fintech workflow.
+---
+
+## Hackathon Submission
+
+- **Event:** Squad Hackathon 3.0
+- **Challenge:** Challenge 01 — Proof of Life
+- **Theme:** Smart Systems: The Intelligent Economy
+- **Submission Date:** May 2026
 
 > Verify once. Pay with confidence.
-"# pay-ai" 

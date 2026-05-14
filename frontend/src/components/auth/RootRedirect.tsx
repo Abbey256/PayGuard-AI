@@ -19,11 +19,10 @@ export default function RootRedirect() {
         }
 
         // Fetch organization by user id
-        const { data: orgs, error } = await supabase
+        const { data: org, error } = await supabase
           .from("organizations")
-          .select("id, name, email, status")
-          .eq("user_id", user.id)
-          .limit(1)
+          .select("id, name, status")
+          .eq("admin_id", user.id)
           .maybeSingle();
 
         if (error) {
@@ -32,11 +31,10 @@ export default function RootRedirect() {
           return;
         }
 
-        const org = orgs as any;
         if (org && org.status === "approved") {
           if (mounted) navigate("/dashboard", { replace: true });
         } else {
-          if (mounted) navigate("/login", { replace: true });
+          if (mounted) navigate("/pending-approval", { replace: true });
         }
       } catch (err) {
         console.error(err);
