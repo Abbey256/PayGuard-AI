@@ -1,17 +1,16 @@
 import PageMeta from "../../components/common/PageMeta";
-import AuthLayout from "./AuthPageLayout";
 import SignInForm from "../../components/auth/SignInForm";
 
 export default function SignIn() {
   return (
     <>
       <PageMeta
-        title="React.js SignIn Dashboard | TailAdmin - Next.js Admin Dashboard Template"
-        description="This is React.js SignIn Tables Dashboard page for TailAdmin - React.js Tailwind CSS Admin Dashboard Template"
+        title="Sign in | PayGuard AI"
+        description="Sign in to PayGuard AI government payroll verification system"
       />
-      <AuthLayout>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
         <SignInForm />
-      </AuthLayout>
+      </div>
     </>
   );
 }

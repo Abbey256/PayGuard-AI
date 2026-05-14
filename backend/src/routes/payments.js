@@ -6,6 +6,7 @@ import {
   approveBatch,
   processPayment,
   getPaymentStatus,
+  simulateFunding,
 } from "../controllers/paymentController.js";
 
 const router = Router();
@@ -18,5 +19,6 @@ router.post("/batches", createPaymentBatch);
 router.post("/batches/:id/approve", approveBatch);
 router.post("/process", processPayment);
 router.get("/status/:id", getPaymentStatus);
+router.post("/simulate-funding", simulateFunding);
 
 export default router;

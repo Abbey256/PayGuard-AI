@@ -30,6 +30,7 @@ dist-ssr
 backend/.env
 backend/.env.*
 !backend/.env.example
-frontend/.env
+frontend/.env.local
 frontend/.env.*
 !frontend/.env.example
+.vite

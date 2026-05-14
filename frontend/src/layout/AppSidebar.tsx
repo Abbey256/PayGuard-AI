@@ -7,6 +7,7 @@ import {
   CreditCard,
   BarChart2,
   Settings,
+  UserCircle,
   ChevronDown,
 } from "lucide-react";
 import { useSidebar } from "../context/SidebarContext";
@@ -49,6 +50,11 @@ const navItems: NavItem[] = [
     icon: <Settings className="w-5 h-5" />,
     name: "Settings",
     path: "/settings",
+  },
+  {
+    icon: <UserCircle className="w-5 h-5" />,
+    name: "My Profile",
+    path: "/profile",
   },
 ];
 

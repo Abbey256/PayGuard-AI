@@ -1,10 +1,10 @@
-import jwt from "jsonwebtoken";
+import { supabase } from "../services/supabaseClient.js";
 
 /**
  * Verify JWT token from Authorization header
- * Attaches decoded user data to req.user
+ * Attaches validated user data to req.user
  */
-export function authMiddleware(req, res, next) {
+export async function authMiddleware(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
 
@@ -17,21 +17,20 @@ export function authMiddleware(req, res, next) {
 
     const token = authHeader.slice(7);
 
-    // In production, verify against Supabase JWT secret
-    // For now, just decode and attach to req
-    const decoded = jwt.decode(token);
+    // Verify token directly with Supabase
+    const { data: { user }, error } = await supabase.auth.getUser(token);
 
-    if (!decoded || !decoded.sub) {
+    if (error || !user) {
       return res.status(401).json({
         success: false,
-        message: "Invalid token",
+        message: "Invalid or expired token",
       });
     }
 
     req.user = {
-      id: decoded.sub,
-      email: decoded.email,
-      aud: decoded.aud,
+      id: user.id,
+      email: user.email,
+      aud: user.aud,
     };
 
     next();

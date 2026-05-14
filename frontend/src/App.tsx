@@ -10,34 +10,46 @@ import Verification from "./pages/PayGuard/Verification";
 import Payments from "./pages/PayGuard/Payments";
 import Reports from "./pages/PayGuard/Reports";
 import Settings from "./pages/PayGuard/Settings";
+import Profile from "./pages/PayGuard/Profile";
 import RootRedirect from "./components/auth/RootRedirect";
+import VerificationPage from "./pages/Verification/VerificationPage";
+import ProtectedRoute from "./components/auth/ProtectedRoute";
+import PendingApproval from "./pages/AuthPages/PendingApproval";
+import { AuthProvider } from "./components/auth/AuthProvider";
 
 export default function App() {
   return (
     <>
       <Router>
         <ScrollToTop />
-        <Routes>
-          {/* Dashboard Layout */}
-          <Route element={<AppLayout />}>
-            {/* PayGuard AI Pages */}
-            <Route path="/" element={<RootRedirect />} />
-            <Route path="/dashboard" element={<Home />} />
-            <Route path="/staff" element={<Staff />} />
-            <Route path="/verify" element={<Verification />} />
-            <Route path="/payments" element={<Payments />} />
-            <Route path="/reports" element={<Reports />} />
-            <Route path="/settings" element={<Settings />} />
-          </Route>
+        <AuthProvider>
+          <Routes>
+            {/* Public worker-facing verification route (no auth, no AppLayout) */}
+            <Route path="/verify/:token" element={<VerificationPage />} />
 
-          {/* Auth Layout */}
-          <Route path="/signin" element={<SignIn />} />
-          <Route path="/login" element={<SignIn />} />
-          <Route path="/signup" element={<SignUp />} />
+            {/* Dashboard Layout (authenticated) */}
+            <Route element={<AppLayout />}>
+              {/* PayGuard AI Pages */}
+              <Route path="/" element={<RootRedirect />} />
+              <Route path="/dashboard" element={<ProtectedRoute><Home /></ProtectedRoute>} />
+              <Route path="/staff" element={<ProtectedRoute><Staff /></ProtectedRoute>} />
+              <Route path="/verify" element={<ProtectedRoute><Verification /></ProtectedRoute>} />
+              <Route path="/payments" element={<ProtectedRoute><Payments /></ProtectedRoute>} />
+              <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
+              <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+              <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+            </Route>
 
-          {/* Fallback Route */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+            {/* Auth Layout */}
+            <Route path="/signin" element={<SignIn />} />
+            <Route path="/login" element={<SignIn />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/pending-approval" element={<PendingApproval />} />
+
+            {/* Fallback Route */}
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </AuthProvider>
       </Router>
     </>
   );

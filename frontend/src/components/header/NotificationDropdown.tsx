@@ -24,6 +24,8 @@ export default function NotificationDropdown() {
 
   useEffect(() => {
     let mounted = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
     async function load() {
       try {
         const {
@@ -37,29 +39,34 @@ export default function NotificationDropdown() {
           setUnreadCount((items as any[]).filter((i) => !i.is_read).length);
         }
 
-        // subscribe to realtime notifications for this user
-        const channel = supabase
-          .channel("public:notifications")
-          .on(
-            "postgres_changes",
-            { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` },
-            (payload) => {
-              setNotifications((prev) => [payload.new, ...prev].slice(0, 10));
-              setUnreadCount((prev) => prev + 1);
-            }
-          )
-          .subscribe();
-
-        return () => {
-          mounted = false;
-          channel.unsubscribe();
-        };
+        // Set up the realtime listener before subscribing. Use a unique name for StrictMode.
+        channel = supabase.channel(`public:notifications:${Date.now()}`);
+        channel.on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${user.id}`,
+          },
+          (payload) => {
+            setNotifications((prev) => [payload.new, ...prev].slice(0, 10));
+            setUnreadCount((prev) => prev + 1);
+          }
+        );
+        channel.subscribe();
       } catch (err) {
         console.error(err);
       }
     }
 
     load();
+    return () => {
+      mounted = false;
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   }, []);
 
   const markAsRead = async (id: string) => {

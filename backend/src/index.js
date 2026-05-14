@@ -1,7 +1,7 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import dotenv from "dotenv";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 
@@ -9,10 +9,10 @@ import { generalLimiter } from "./middleware/rateLimiter.js";
 import authRoutes from "./routes/auth.js";
 import staffRoutes from "./routes/staff.js";
 import verificationRoutes from "./routes/verification.js";
+import verifyRoutes from "./routes/verify.js";
 import paymentRoutes from "./routes/payments.js";
 import reportRoutes from "./routes/reports.js";
-
-dotenv.config();
+import organizationRoutes from "./routes/organizations.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -33,8 +33,10 @@ app.use(generalLimiter);
 app.use("/api/auth", authRoutes);
 app.use("/api/staff", staffRoutes);
 app.use("/api/verification", verificationRoutes);
+app.use("/api/verify", verifyRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/reports", reportRoutes);
+app.use("/api/organizations", organizationRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {

@@ -1,17 +1,16 @@
 import PageMeta from "../../components/common/PageMeta";
-import AuthLayout from "./AuthPageLayout";
 import SignUpForm from "../../components/auth/SignUpForm";
 
 export default function SignUp() {
   return (
     <>
       <PageMeta
-        title="React.js SignUp Dashboard | TailAdmin - Next.js Admin Dashboard Template"
-        description="This is React.js SignUp Tables Dashboard page for TailAdmin - React.js Tailwind CSS Admin Dashboard Template"
+        title="Create account | PayGuard AI"
+        description="Create a PayGuard AI government agency account"
       />
-      <AuthLayout>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
         <SignUpForm />
-      </AuthLayout>
+      </div>
     </>
   );
 }
