@@ -26,6 +26,7 @@ export default function NotificationDropdown() {
   useEffect(() => {
     let mounted = true;
     let channel: ReturnType<typeof supabase.channel> | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     async function load() {
       try {
@@ -40,8 +41,8 @@ export default function NotificationDropdown() {
           setUnreadCount((items as any[]).filter((i) => !i.is_read).length);
         }
 
-        // Set up the realtime listener before subscribing. Use a unique name for StrictMode.
-        channel = supabase.channel(`public:notifications:${Date.now()}`);
+        // Try setting up realtime — fall back to polling if WebSocket fails
+        channel = supabase.channel(`notifications:${user.id}`);
         channel.on(
           "postgres_changes",
           {
@@ -55,15 +56,32 @@ export default function NotificationDropdown() {
             setUnreadCount((prev) => prev + 1);
           }
         );
-        channel.subscribe();
+
+        channel.subscribe((status, err) => {
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            // WebSocket blocked — fall back to 30s polling
+            if (!pollInterval && mounted) {
+              pollInterval = setInterval(async () => {
+                try {
+                  const refreshed = await fetchNotifications(user.id);
+                  if (mounted) {
+                    setNotifications(refreshed as any[]);
+                    setUnreadCount((refreshed as any[]).filter((i: any) => !i.is_read).length);
+                  }
+                } catch { /* silent */ }
+              }, 30_000);
+            }
+          }
+        });
       } catch (err) {
-        console.error(err);
+        // Non-fatal — notifications are a convenience feature
       }
     }
 
     load();
     return () => {
       mounted = false;
+      if (pollInterval) clearInterval(pollInterval);
       if (channel) {
         supabase.removeChannel(channel);
       }

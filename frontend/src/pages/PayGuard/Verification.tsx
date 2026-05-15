@@ -11,7 +11,7 @@ interface VerificationRequest {
   employee_id: string;
   email: string;
   created_at: string;
-  status: "pending" | "sent" | "completed";
+  status: "pending" | "sent" | "completed" | "expired";
   token_expires_at: string | null;
   photo_url?: string | null;
 }
@@ -45,6 +45,18 @@ export default function Verification() {
   const loadVerifications = useCallback(async () => {
     setIsLoading(true);
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // Get the admin's organization
+      const { data: org } = await supabase
+        .from('organizations')
+        .select('id')
+        .eq('admin_id', user.id)
+        .single();
+
+      if (!org) return;
+
       const { data, error } = await supabase
         .from("verification_requests")
         .select(`
@@ -53,13 +65,26 @@ export default function Verification() {
           status,
           token_expires_at,
           created_at,
-          staff ( name, employee_id, email, photo_url )
+          staff ( name, employee_id, email, photo_url, organization_id )
         `)
+        // Only rows that are NOT expired — active requests only
+        .not('status', 'eq', 'expired')
         .order("created_at", { ascending: false });
 
       if (error) throw error;
 
-      const mapped: VerificationRequest[] = (data ?? []).map((row: any) => ({
+      // De-duplicate: keep only the most-recent row per staff member
+      // (created_at DESC order means first occurrence = latest)
+      const seenStaffIds = new Set<string>();
+      const deduped = (data ?? []).filter((row: any) => {
+        // Only include staff in this organization
+        if (row.staff?.organization_id !== org.id) return false;
+        if (seenStaffIds.has(row.staff_id)) return false;
+        seenStaffIds.add(row.staff_id);
+        return true;
+      });
+
+      const mapped: VerificationRequest[] = deduped.map((row: any) => ({
         id: row.id,
         staff_id: row.staff_id,
         staff_name: row.staff?.name ?? "Unknown",

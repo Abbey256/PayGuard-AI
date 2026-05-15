@@ -42,7 +42,22 @@ router.post("/send", authMiddleware, async (req, res, next) => {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
 
-    // Insert into verification_requests (create a new record for each request)
+    // --- DEDUP: expire any existing non-completed requests for this staff ---
+    // This ensures there is always exactly ONE active verification request per
+    // staff member. Previous duplicates are marked expired so they no longer
+    // appear as pending or sent in the Verification Center.
+    const { error: expireError } = await supabase
+      .from("verification_requests")
+      .update({ status: "expired", token_expires_at: new Date().toISOString() })
+      .eq("staff_id", staffId)
+      .in("status", ["pending", "sent"]);
+
+    if (expireError) {
+      console.error("Failed to expire old verification requests:", expireError);
+      // Non-fatal — still proceed with creating the new one
+    }
+
+    // Insert a single fresh verification_request for this staff member
     const { error: insertError } = await supabase
       .from("verification_requests")
       .insert({

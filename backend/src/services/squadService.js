@@ -136,6 +136,7 @@ export async function initiateTransfer({
         status: response.data.data?.status,
         amount: response.data.data?.amount / 100,
       },
+      response: response.data
     };
   } catch (error) {
     console.error("Error initiating transfer:", error.response?.data || error.message);

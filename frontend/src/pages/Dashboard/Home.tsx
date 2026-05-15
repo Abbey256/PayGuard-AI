@@ -41,33 +41,42 @@ export default function Home() {
   useEffect(() => {
     async function loadDashboard() {
       try {
-        const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
 
-        const [staffResp, verifyResp, batchResp] = await Promise.all([
-          supabase.from("staff").select("status"),
-          supabase.from("verification_requests").select("status").gte("created_at", monthStart),
-          supabase.from("payment_batches").select("status, total_amount"),
+        const { data: org } = await supabase
+          .from('organizations')
+          .select('id')
+          .eq('admin_id', user.id)
+          .single();
+
+        if (!org) return;
+
+        const [staffResp, batchResp] = await Promise.all([
+          supabase.from("staff").select("status, salary").eq("organization_id", org.id),
+          supabase.from("payment_batches").select("status, total_amount").eq("organization_id", org.id),
         ]);
 
         const staff = staffResp.data ?? [];
-        const verifications = verifyResp.data ?? [];
         const batches = batchResp.data ?? [];
 
         const totalStaff = staff.length;
-        const verifiedThisMonth = verifications.filter((v) => v.status === "completed").length;
+        // "Verified This Month" = staff currently with status 'verified' (current round)
+        const verifiedThisMonth = staff.filter((s) => s.status === "verified").length;
         const ghostsFlagged = staff.filter((s) => s.status === "flagged").length;
+        const pendingCount = staff.filter((s) => s.status === "pending" || s.status === "sent").length;
 
         // Estimate savings: ₦180,000 avg ghost salary × flagged count
         const estimatedSavings = ghostsFlagged * 180_000;
 
         setStats({ totalStaff, verifiedThisMonth, ghostsFlagged, estimatedSavings });
 
-        // Verification breakdown
-        const total = verifications.length || 1; // avoid div/0
+        // Verification breakdown — derived from staff.status (current round only)
+        const total = totalStaff || 1;
         setVerificationBreakdown({
-          completed: Math.round((verifications.filter((v) => v.status === "completed").length / total) * 100),
-          inProgress: Math.round((verifications.filter((v) => v.status === "sent").length / total) * 100),
-          failed: Math.round((verifications.filter((v) => v.status === "pending").length / total) * 100),
+          completed: Math.round((verifiedThisMonth / total) * 100),
+          inProgress: Math.round((staff.filter((s) => s.status === "sent").length / total) * 100),
+          failed: Math.round((pendingCount / total) * 100),
         });
 
         // Payment status amounts
@@ -84,6 +93,15 @@ export default function Home() {
     }
 
     loadDashboard();
+
+    const staffSub = supabase
+      .channel('dashboard-staff-changes')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'staff' }, () => {
+         loadDashboard();
+      })
+      .subscribe();
+      
+    return () => { supabase.removeChannel(staffSub); }
   }, []);
 
   const statCards = [
@@ -112,28 +130,61 @@ export default function Home() {
             </div>
             <button
               onClick={async () => {
-                if (roundActive) {
-                  setRoundActive(false);
-                  return;
-                }
-
-                if (!window.confirm("Start a new verification round? This will set all staff members to 'pending' status for this month's audit.")) return;
+                if (!window.confirm("This will reset all staff verification status for the new month. All staff must re-verify before next salary payment. Continue?")) return;
 
                 try {
                   setIsLoading(true);
-                  // 1. Reset all staff to pending
-                  const { error: staffError } = await supabase
+                  const { data: { user } } = await supabase.auth.getUser();
+                  const { data: org } = await supabase.from('organizations').select('id').eq('admin_id', user!.id).single();
+                  const orgId = org.id;
+
+                  // 1. Update ALL staff in this organization (only existing columns):
+                  const { data: staffData, error: staffError } = await supabase
                     .from("staff")
-                    .update({ status: "pending" })
-                    .not("status", "eq", "flagged"); // Keep flagged staff flagged
+                    .update({ 
+                       status: 'pending',
+                       trust_score: null,
+                     })
+                    .eq('organization_id', orgId)
+                    .select('id');
 
                   if (staffError) throw staffError;
 
-                  // 2. Clear old verification requests (optional, but cleaner)
-                  // We'll keep them for history but maybe mark them as expired
+                  const staffIds = (staffData || []).map((s: any) => s.id);
 
-                  setRoundActive(true);
-                  // Refresh stats
+                  // 2. Expire ALL existing requests for these staff (no duplicates)
+                  if (staffIds.length > 0) {
+                    await supabase
+                      .from('verification_requests')
+                      .update({ status: 'expired', token_expires_at: new Date().toISOString() })
+                      .in('staff_id', staffIds)
+                      .in('status', ['pending', 'sent', 'completed']);
+                  }
+
+                  // 3. Insert exactly ONE fresh pending request per staff member
+                  const expiryDate = new Date();
+                  expiryDate.setDate(expiryDate.getDate() + 7);
+                  
+                  const newRequests = staffIds.map((id: string) => ({
+                    staff_id: id,
+                    token: crypto.randomUUID(),
+                    token_expires_at: expiryDate.toISOString(),
+                    status: 'pending'
+                  }));
+                  
+                  if (newRequests.length > 0) {
+                     await supabase.from('verification_requests').insert(newRequests);
+                  }
+
+                  // 5. Log to audit_logs
+                  const monthName = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+                  await supabase.from('audit_logs').insert({
+                    action: 'NEW_VERIFICATION_ROUND_STARTED',
+                    changes: { month: monthName, staffReset: staffData?.length || 0 }
+                  });
+
+                  // 3 & 4. Show success toast and refresh stats
+                  alert(`New verification round started. All ${staffData?.length || 0} staff reset to pending. Send new verification links to begin.`);
                   window.location.reload(); 
                 } catch (err) {
                   console.error(err);
@@ -146,7 +197,7 @@ export default function Home() {
               className="rounded-lg bg-emerald-600 px-8 py-3 font-semibold text-white hover:bg-emerald-700 transition shadow-lg flex items-center gap-2 disabled:opacity-50"
             >
               <Sparkles size={20} />
-              {roundActive ? "Stop Verification Round" : "Start New Verification Round"}
+              Start New Verification Round
             </button>
           </div>
         </div>

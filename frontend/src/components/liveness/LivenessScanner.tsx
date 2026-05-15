@@ -102,7 +102,32 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
   const headTurnState = useRef<HeadTurnState>({ leftDetected: false, passed: false });
   const smileState = useRef<SmileState>({ smileStartMs: null, passed: false });
   const lastProcessedTime = useRef(0);
-  const hasStaticFace = useRef(true); // Default true, set to false if movement detected (simplified)
+  const hasStaticFace = useRef(true);
+  const faceApiLoadingPromise = useRef<Promise<void> | null>(null);
+
+  // -----------------------------------------------------------------------
+  // Start loading face-api models IMMEDIATELY on mount (not on tap)
+  // so they are ready by the time challenges finish.
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    if (!adminPhotoUrl) {
+      console.warn('[PayGuard] No adminPhotoUrl — face match will BLOCK verification.');
+      return;
+    }
+    console.log('[PayGuard] Starting face-api model download immediately...');
+    const weightsUrl = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+    faceApiLoadingPromise.current = Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri(weightsUrl),
+      faceapi.nets.faceLandmark68Net.loadFromUri(weightsUrl),
+      faceapi.nets.faceRecognitionNet.loadFromUri(weightsUrl),
+    ]).then(() => {
+      faceApiLoaded.current = true;
+      console.log('[PayGuard] Face-API models loaded ✅');
+    }).catch(err => {
+      console.error('[PayGuard] Face-API models FAILED to load ❌', err);
+      faceApiLoadingPromise.current = null;
+    });
+  }, [adminPhotoUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const advanceStage = useCallback((newStage: Stage, feedbackText: string, speechText: string) => {
     setStage(newStage);
@@ -127,18 +152,7 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
     stageRef.current = 'initializing';
     setFeedback('Starting camera and AI...');
     initCameraAndAI();
-
-    // Load Face-API models in the background for final face match
-    if (adminPhotoUrl) {
-      const weightsUrl = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
-      Promise.all([
-        faceapi.nets.ssdMobilenetv1.loadFromUri(weightsUrl),
-        faceapi.nets.faceLandmark68Net.loadFromUri(weightsUrl),
-        faceapi.nets.faceRecognitionNet.loadFromUri(weightsUrl)
-      ]).then(() => {
-        faceApiLoaded.current = true;
-      }).catch(err => console.error("Face-API models failed to load", err));
-    }
+    // Face-api models are already loading from the useEffect above — no need to restart here.
   };
 
   const captureSnapshot = (): string | null => {
@@ -167,42 +181,100 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
 
     const result = computeTrustScore({
       challengesPassed: passedCount,
-      staticFaceDetected: false, // For simplicity in this rewrite
+      staticFaceDetected: false,
     });
 
     let finalVerdict = result.verdict;
     let finalTrustScore = result.trustScore;
 
-    // --- REAL FACE MATCHING (Frontend) ---
-    if (snapshotBase64 && adminPhotoUrl && faceApiLoaded.current) {
-      setFeedback('Comparing face with database...');
-      try {
-        const snapshotImg = await faceapi.fetchImage(snapshotBase64);
-        
-        const adminImg = new Image();
-        adminImg.crossOrigin = 'anonymous';
-        adminImg.src = adminPhotoUrl;
-        await new Promise((resolve, reject) => {
-          adminImg.onload = resolve;
-          adminImg.onerror = reject;
-        });
+    console.log(`[PayGuard] finishVerification: liveness score=${finalTrustScore}, adminPhotoUrl=${adminPhotoUrl ? 'SET' : 'MISSING'}`);
 
-        const snapshotDetection = await faceapi.detectSingleFace(snapshotImg).withFaceLandmarks().withFaceDescriptor();
-        const adminDetection = await faceapi.detectSingleFace(adminImg).withFaceLandmarks().withFaceDescriptor();
-
-        if (snapshotDetection && adminDetection) {
-          const distance = faceapi.euclideanDistance(snapshotDetection.descriptor, adminDetection.descriptor);
-          const matchConfidence = Math.max(0, 100 - (distance * 100)); // Rough distance to percentage
-          
-          if (distance > 0.6) {
-            finalVerdict = 'flagged';
-          }
-          finalTrustScore = Math.round(matchConfidence);
-        }
-      } catch (err) {
-        console.error("Face match failed natively", err);
+    // HARD BLOCK: If no reference photo exists, we cannot verify this person's identity.
+    // Flag immediately — liveness alone is not enough for payment authorisation.
+    if (!adminPhotoUrl) {
+      console.error('[PayGuard] No reference photo — cannot verify identity. Flagging.');
+      finalVerdict = 'flagged';
+      finalTrustScore = 0;
+      // Skip face matching, submit result
+    } else {
+      // If models are still loading, wait up to 30 seconds
+      if (faceApiLoadingPromise.current && !faceApiLoaded.current) {
+        setFeedback('Loading face recognition AI...');
+        console.log('[PayGuard] Waiting for face-api models...');
+        const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 30000));
+        await Promise.race([faceApiLoadingPromise.current, timeoutPromise]);
+        console.log(`[PayGuard] After wait: faceApiLoaded=${faceApiLoaded.current}`);
       }
-    }
+
+      // --- REAL FACE MATCHING ---
+      setFeedback('Comparing face with database...');
+
+      if (!faceApiLoaded.current) {
+        console.error('[PayGuard] Face-API models not loaded after wait — flagging.');
+        finalVerdict = 'flagged';
+        finalTrustScore = Math.min(finalTrustScore, 35);
+      } else if (snapshotBase64) {
+        try {
+          console.log('[PayGuard] Running face comparison...');
+          const snapshotImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = (e) => { console.error('[PayGuard] Snapshot image load failed', e); reject(e); };
+            img.src = snapshotBase64;
+          });
+
+          const adminImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => resolve(img);
+            img.onerror = (e) => { console.error('[PayGuard] Admin photo load failed (CORS?)', e); reject(e); };
+            img.src = adminPhotoUrl;
+          });
+
+          const snapshotDetection = await faceapi
+            .detectSingleFace(snapshotImg)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+
+          const adminDetection = await faceapi
+            .detectSingleFace(adminImg)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+
+          console.log(`[PayGuard] Detections: snapshot=${!!snapshotDetection}, admin=${!!adminDetection}`);
+
+          if (snapshotDetection && adminDetection) {
+            const distance = faceapi.euclideanDistance(
+              snapshotDetection.descriptor,
+              adminDetection.descriptor
+            );
+            const matchConfidence = Math.max(0, Math.round((1 - distance) * 100));
+            console.log(`[PayGuard] Face distance=${distance.toFixed(3)}, matchConfidence=${matchConfidence}%`);
+
+            if (distance > 0.55) {
+              finalVerdict = 'flagged';
+              finalTrustScore = Math.min(finalTrustScore, Math.round(matchConfidence * 0.4));
+            } else {
+              finalTrustScore = Math.round((finalTrustScore * 0.5) + (matchConfidence * 0.5));
+              finalTrustScore = Math.min(100, finalTrustScore);
+            }
+          } else {
+            console.warn('[PayGuard] Could not detect face in snapshot or admin photo — flagging.');
+            finalVerdict = 'flagged';
+            finalTrustScore = Math.min(finalTrustScore, 30);
+          }
+        } catch (err) {
+          console.error('[PayGuard] Face match error — flagging:', err);
+          finalVerdict = 'flagged';
+          finalTrustScore = Math.min(finalTrustScore, 30);
+        }
+      } else {
+        console.error('[PayGuard] No snapshot captured — flagging.');
+        finalVerdict = 'flagged';
+        finalTrustScore = 0;
+      }
+    } // end else (adminPhotoUrl exists)
+
 
     try {
       let apiUrl = import.meta.env.VITE_API_URL || '';

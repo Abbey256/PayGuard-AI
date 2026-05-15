@@ -123,38 +123,47 @@ export async function submitVerification(req, res, next) {
       return res.status(409).json({ message: "Token already used or not found" });
     }
 
+    if (!verificationRequest.staff.photo_url) {
+      return res.status(400).json({ message: "No reference photo available for face matching. Contact HR." });
+    }
+
     const { id: verificationId, staff_id: staffId } = verificationRequest;
     
-    // Update verification_requests record.
+    // Update verification_requests — status must be 'completed' so the
+    // token cannot be re-used (guard at line 122 checks status === 'completed').
     const { error: verificationUpdateError } = await supabase
       .from("verification_requests")
       .update({
+        status: "completed",
+        completed_at: new Date().toISOString(),
         liveness_score: trustScore,
         final_score: trustScore, 
         final_verdict: verdict,
         challenges_passed: livenessData?.challengesPassed ?? 0,
         challenges_total: 3,
-        status: "completed",
-        completed_at: new Date().toISOString(),
       })
       .eq("id", verificationId);
 
     if (verificationUpdateError) {
+      console.error("verification_requests update failed:", verificationUpdateError);
       throw verificationUpdateError;
     }
 
     const isVerified = verdict === "verified";
 
-    // Update staff record — only after the verification_requests update succeeds.
+    // Update staff record — only the columns that definitely exist in the schema.
+    const staffUpdate = {
+      status: verdict,
+      trust_score: trustScore,
+    };
+
     const { error: staffUpdateError } = await supabase
       .from("staff")
-      .update({
-        trust_score: trustScore,
-        status: isVerified ? "verified" : "flagged",
-      })
+      .update(staffUpdate)
       .eq("id", staffId);
 
     if (staffUpdateError) {
+      console.error("staff update failed:", staffUpdateError);
       throw staffUpdateError;
     }
 
@@ -181,6 +190,13 @@ export async function submitVerification(req, res, next) {
 
       // 2. Create one if it doesn't exist
       if (!batch) {
+        // Fetch org to get admin_id for created_by
+        const { data: orgData } = await supabase
+          .from("organizations")
+          .select("admin_id")
+          .eq("id", orgId)
+          .single();
+
         const { data: newBatch, error: createError } = await supabase
           .from("payment_batches")
           .insert({
@@ -189,7 +205,7 @@ export async function submitVerification(req, res, next) {
             staff_count: 0,
             total_amount: 0,
             status: "pending",
-            verification_rate: 100 // Default, will recalculate if needed
+            created_by: orgData?.admin_id
           })
           .select()
           .single();
@@ -227,11 +243,16 @@ export async function submitVerification(req, res, next) {
     }
 
     // Log to audit_logs
-    await supabase.from("audit_logs").insert({
-      action: "LIVENESS_VERIFICATION_SUBMITTED",
-      description: `Liveness & Face Match submitted for staff ${staffId}. Verdict: ${verdict} (Final Score: ${trustScore})`,
-      entity_type: "verification_request",
-      entity_id: verificationId,
+    await supabase.from('audit_logs').insert({
+      action: 'STAFF_VERIFIED',
+      entity_type: 'staff',
+      entity_id: staffId,
+      changes: { 
+        verdict, 
+        trustScore,
+        previousStatus: 'pending'
+      },
+      created_at: new Date().toISOString()
     });
 
     return res.status(200).json({ success: true, verdict });

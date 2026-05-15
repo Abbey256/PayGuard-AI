@@ -36,6 +36,7 @@ function Toast({ message, type }: { message: string; type: "success" | "error" }
 
 export default function Payments() {
   const [paymentBatches, setPaymentBatches] = useState<PaymentBatch[]>([]);
+  const [flaggedStaffData, setFlaggedStaffData] = useState<VerifiedStaff[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
   const [paymentConfirmModal, setPaymentConfirmModal] = useState(false);
@@ -58,6 +59,84 @@ export default function Payments() {
   const loadBatches = useCallback(async () => {
     setIsLoading(true);
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: org } = await supabase.from('organizations').select('id').eq('admin_id', user.id).single();
+      if (!org) return;
+
+      const orgId = org.id;
+
+      // Fetch all verified staff for this org (status='verified' is set by verifyController after liveness passes)
+      const { data: pendingStaff, error: staffFetchError } = await supabase
+        .from('staff')
+        .select('id, name, first_name, last_name, employee_id, salary, trust_score, status')
+        .eq('organization_id', orgId)
+        .eq('status', 'verified');
+
+      if (staffFetchError) console.error('Staff fetch error:', staffFetchError);
+
+      if (pendingStaff && pendingStaff.length > 0) {
+        const monthStr = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+        const batchName = `${monthStr} Payroll`;
+        const monthFilter = new Date().toISOString().substring(0, 7);
+
+        let sumOfSalaries = pendingStaff.reduce((sum, s) => sum + (s.salary || 0), 0);
+        let verifiedCount = pendingStaff.length;
+
+        let { data: batch, error: batchFetchError } = await supabase
+          .from('payment_batches')
+          .select('id, staff_count, total_amount')
+          .eq('organization_id', orgId)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(); // returns null (not an error) when no row exists
+
+        if (batchFetchError) console.error('Batch fetch error:', batchFetchError);
+
+        if (!batch) {
+          const { data: newBatch } = await supabase.from('payment_batches').insert({
+            organization_id: orgId,
+            batch_name: batchName,
+            status: 'pending',
+            staff_count: verifiedCount,
+            total_amount: sumOfSalaries,
+            created_by: user.id
+          }).select().single();
+          batch = newBatch;
+        }
+
+        if (batch) {
+           // Add staff to batch only if not already there
+           const { data: existingEntries } = await supabase
+             .from('payment_batch_staff')
+             .select('staff_id')
+             .eq('batch_id', batch.id);
+
+           const alreadyInBatch = new Set((existingEntries || []).map((e: any) => e.staff_id));
+           const newEntries = pendingStaff
+             .filter(s => !alreadyInBatch.has(s.id))
+             .map(s => ({ batch_id: batch.id, staff_id: s.id }));
+
+           if (newEntries.length > 0) {
+             await supabase.from('payment_batch_staff').insert(newEntries);
+             // Update batch totals to reflect the newly added staff
+             await supabase.from('payment_batches').update({
+               staff_count: (existingEntries?.length || 0) + newEntries.length,
+               total_amount: pendingStaff.reduce((sum: number, s: any) => sum + (s.salary || 0), 0),
+             }).eq('id', batch.id);
+           }
+        }
+      }
+
+      // Load flagged staff
+      const { data: flagged } = await supabase
+        .from('staff')
+        .select('id, name, first_name, last_name, employee_id, trust_score, salary')
+        .eq('organization_id', orgId)
+        .eq('status', 'flagged');
+      setFlaggedStaffData((flagged as any) || []);
+
       const { data, error } = await supabase
         .from("payment_batches")
         .select(`
@@ -67,11 +146,11 @@ export default function Payments() {
           total_amount,
           created_at,
           status,
-          verification_rate,
           payment_batch_staff (
-            staff ( id, name, employee_id, trust_score, salary )
+            staff ( id, name, first_name, last_name, employee_id, trust_score, salary )
           )
         `)
+        .eq('organization_id', orgId)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -83,9 +162,14 @@ export default function Payments() {
         total_amount: b.total_amount,
         created_at: b.created_at,
         status: b.status,
-        verification_rate: b.verification_rate ?? 0,
         verified_staff: (b.payment_batch_staff ?? [])
-          .map((r: any) => r.staff)
+          .map((r: any) => {
+             if (r.staff) {
+               const name = r.staff.name || `${r.staff.first_name || ''} ${r.staff.last_name || ''}`.trim();
+               return { ...r.staff, name };
+             }
+             return null;
+          })
           .filter(Boolean),
       }));
 
@@ -251,9 +335,9 @@ export default function Payments() {
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-2">
                           <div className="w-24 bg-gray-200 rounded-full h-2 dark:bg-gray-700">
-                            <div className="bg-emerald-600 h-2 rounded-full" style={{ width: `${batch.verification_rate}%` }} />
+                            <div className="bg-emerald-600 h-2 rounded-full" style={{ width: `100%` }} />
                           </div>
-                          <span className="text-sm font-medium text-gray-900 dark:text-white">{batch.verification_rate}%</span>
+                          <span className="text-sm font-medium text-gray-900 dark:text-white">100%</span>
                         </div>
                       </td>
                       <td className="px-6 py-4">
@@ -276,7 +360,7 @@ export default function Payments() {
                           {batch.status === "approved" && (
                             <button onClick={() => { setSelectedBatch(batch); setPaymentConfirmModal(true); }}
                               className="rounded-lg bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700 transition flex items-center gap-1">
-                              <CreditCard size={14} /> Pay
+                              <CreditCard size={14} /> Approve & Process Payment
                             </button>
                           )}
                           {batch.status === "processed" && (
@@ -304,6 +388,40 @@ export default function Payments() {
             Each payment is released via Squad API only after HR approval — never by AI alone.
           </p>
         </div>
+
+        {/* Flagged Staff Table */}
+        {flaggedStaffData.length > 0 && (
+          <div className="overflow-hidden rounded-lg border border-red-200 bg-white dark:border-red-900 dark:bg-gray-900 mt-8">
+            <div className="border-b border-red-200 bg-red-50 p-6 dark:border-red-900 dark:bg-red-950 flex justify-between items-center">
+              <h3 className="text-lg font-semibold text-red-900 dark:text-red-100">Flagged Staff (Excluded from Payment)</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    {["Name", "Employee ID", "Trust Score", "Salary"].map((h) => (
+                      <th key={h} className="px-6 py-4 text-sm font-semibold text-gray-900 dark:text-white text-left">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {flaggedStaffData.map((staff) => (
+                    <tr key={staff.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="px-6 py-4 font-medium text-gray-900 dark:text-white">{staff.name || `${(staff as any).first_name || ''} ${(staff as any).last_name || ''}`.trim()}</td>
+                      <td className="px-6 py-4 text-gray-900 dark:text-white">{staff.employee_id}</td>
+                      <td className="px-6 py-4">
+                        <span className="inline-block rounded-full bg-red-100 px-2 py-1 text-xs font-medium text-red-700">
+                          {staff.trust_score}%
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 font-medium text-gray-900 dark:text-white">{formatNaira(staff.salary)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Review Modal */}

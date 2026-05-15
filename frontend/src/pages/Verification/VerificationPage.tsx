@@ -60,6 +60,14 @@ export default function VerificationPage() {
         }
 
         const data = await resp.json();
+        
+        // If staff has no photo, we cannot do face matching — block immediately
+        if (!data.photoUrl) {
+          setErrorText('Your verification photo has not been uploaded by your HR department. Please contact HR to add your photo before verification can proceed.');
+          setPageState('error');
+          return;
+        }
+
         setWorkerInfo({
           workerName: data.workerName ?? 'Employee',
           organizationName: data.organizationName ?? 'Your Organisation',

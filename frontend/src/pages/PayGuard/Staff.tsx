@@ -79,6 +79,21 @@ export default function Staff() {
 
   useEffect(() => {
     loadStaff();
+
+    const channel = supabase
+      .channel('staff-changes')
+      .on('postgres_changes', 
+        { event: 'UPDATE', schema: 'public', table: 'staff' },
+        (payload) => {
+          // update that staff row in local state immediately
+          setStaffData(prev => prev.map(s => s.id === payload.new.id ? { ...s, ...payload.new } : s));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [loadStaff]);
 
   // -------------------------------------------------------------------------

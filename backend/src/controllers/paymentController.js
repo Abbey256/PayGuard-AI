@@ -146,7 +146,7 @@ async function processPayment(req, res, next) {
       }
 
       const timestamp = Date.now();
-      const uniqueRef = `PG-${orgId.slice(0,8)}-${staffId.slice(0,8)}-${timestamp}`;
+      const uniqueRef = `PG-${orgId}-${staffId}-${timestamp}`;
       const salaryKobo = salary * 100;
       const currentMonth = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
 
@@ -155,8 +155,8 @@ async function processPayment(req, res, next) {
         amount: salaryKobo,
         bankCode: bank_code,
         accountNumber: bank_account,
-        accountName: accountName,
-        remark: `PayGuard AI - ${staffName} - ${currentMonth}`
+        accountName: `${first_name} ${last_name}`,
+        remark: `PayGuard AI - ${first_name} ${last_name} - ${currentMonth} Salary`
       });
 
       if (transferResult.success) {
@@ -169,10 +169,14 @@ async function processPayment(req, res, next) {
           batch_id: batchId,
           staff_id: staffId,
           amount: salary,
-          status: "completed",
-          transaction_ref: uniqueRef,
-          squad_transaction_id: transferResult.data?.transaction_id || "simulated"
+          amount_kobo: salaryKobo,
+          squad_transaction_reference: uniqueRef,
+          squad_response: transferResult.response || transferResult.data || {},
+          status: 'success',
+          paid_at: new Date().toISOString()
         });
+
+        // (Staff payment_status column does not exist, tracking is handled via payment_records)
 
         await supabase.from("audit_logs").insert({
           user_id: userId,
@@ -200,7 +204,12 @@ async function processPayment(req, res, next) {
 
     await supabase
       .from("payment_batches")
-      .update({ status: "processed" })
+      .update({ 
+        status: "processed",
+        processed_at: new Date().toISOString(),
+        total_paid: paidCount,
+        total_amount_disbursed: totalDisbursedNaira
+      })
       .eq("id", batchId);
 
     const remainingBalanceNaira = currentWalletBalanceKobo / 100;

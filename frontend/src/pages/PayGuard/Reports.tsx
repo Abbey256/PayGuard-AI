@@ -95,13 +95,24 @@ export default function Reports() {
   const loadWalletHistory = async () => {
     setIsLoadingWallet(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch(`${apiUrl}/api/payments/transactions`, {
-        headers: { "Authorization": `Bearer ${session?.access_token}` },
-      });
-      const result = await response.json();
-      if (result.success) setWalletTransactions(result.transactions);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: org } = await supabase.from('organizations').select('id').eq('admin_id', user.id).single();
+      if (!org) return;
+
+      const { data: records, error } = await supabase
+        .from("payment_records")
+        .select(`
+          id, created_at, amount, status, squad_transaction_id, transaction_ref, error_message,
+          staff ( name, first_name, last_name, employee_id, organization_id )
+        `)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) throw error;
+      
+      const orgRecords = (records || []).filter(r => r.staff?.organization_id === org.id);
+      setWalletTransactions(orgRecords);
     } catch (err) {
       console.error("Failed to load wallet history", err);
     } finally {
@@ -270,10 +281,10 @@ export default function Reports() {
               <thead>
                 <tr className="border-b border-gray-100 dark:border-gray-800">
                   <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Date</th>
-                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Type</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Staff Name</th>
                   <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Amount</th>
-                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Reason / Narration</th>
-                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Squad Ref Number</th>
+                  <th className="pb-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
@@ -281,39 +292,38 @@ export default function Reports() {
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-gray-400">
                       <Loader size={20} className="animate-spin mx-auto mb-2" />
-                      Fetching audit trail...
+                      Fetching payment records...
                     </td>
                   </tr>
                 ) : walletTransactions.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-gray-400 italic">
-                      No wallet transactions recorded.
+                      No payment transactions recorded.
                     </td>
                   </tr>
                 ) : (
                   walletTransactions.map((tx) => (
                     <tr key={tx.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors">
                       <td className="py-4 text-sm text-gray-600 dark:text-gray-400">
-                        {new Date(tx.created_at).toLocaleDateString()}
+                        {new Date(tx.created_at).toLocaleString()}
                       </td>
-                      <td className="py-4">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                          tx.action === 'WALLET_FUNDED' ? 'bg-emerald-100 text-emerald-700' : 
-                          tx.action === 'PAYOUT' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
-                        }`}>
-                          {tx.action === 'WALLET_FUNDED' ? 'Inflow' : tx.action === 'PAYOUT' ? 'Outflow' : 'Audit'}
-                        </span>
+                      <td className="py-4 text-sm font-medium text-gray-900 dark:text-white">
+                        {tx.staff?.name || `${tx.staff?.first_name || ''} ${tx.staff?.last_name || ''}`.trim() || 'Unknown'}
                       </td>
-                      <td className={`py-4 text-sm font-bold ${tx.action === 'WALLET_FUNDED' ? 'text-emerald-600' : 'text-gray-900 dark:text-white'}`}>
-                        ₦{(tx.changes?.amount ?? 0).toLocaleString()}
+                      <td className="py-4 text-sm font-bold text-emerald-600">
+                        {formatNaira(tx.amount)}
                       </td>
-                      <td className="py-4 text-sm text-gray-700 dark:text-gray-300">
-                        {tx.changes?.reason || tx.target_staff || '—'}
+                      <td className="py-4 text-sm text-gray-700 dark:text-gray-300 font-mono">
+                        {tx.squad_transaction_id || tx.transaction_ref || '—'}
                       </td>
-                      <td className="py-4">
-                        <span className="text-[10px] font-mono text-gray-500 uppercase">
-                          {tx.changes?.status || 'Completed'}
-                        </span>
+                      <td className="py-4 text-sm">
+                        {(tx.status === 'success' || tx.status === 'completed') ? (
+                          <a href="https://sandbox.squadco.com/transactions" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 font-medium">
+                            View in Squad
+                          </a>
+                        ) : (
+                          <span className="text-red-500">{tx.error_message || tx.status}</span>
+                        )}
                       </td>
                     </tr>
                   ))

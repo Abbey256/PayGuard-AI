@@ -45,7 +45,6 @@ PayGuard AI isn't just integrated with Squad; it is **governed** by it.
 | Feature | Squad API Endpoint | Purpose |
 | :--- | :--- | :--- |
 | **Ministry Wallets** | `Sub-account API` | Creates isolated, secure funding pools for each government department. |
-| **Worker Accounts** | `Virtual Account API` | Auto-generates unique receiving accounts for verified personnel. |
 | **Identity Locking** | `Account Lookup API` | Ensures the bank account name matches the payroll name before any Naira moves. |
 | **Smart Payouts** | `Payout/Transfer API` | The "Final Switch"—only triggered by the AI Trust Engine. |
 
