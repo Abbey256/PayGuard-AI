@@ -544,35 +544,55 @@ export default function Staff() {
           onPhotoUpload={async (id, file) => {
             try {
               const { data: { user } } = await supabase.auth.getUser();
-              if (!user) return;
-              
-              const { data: org } = await supabase.from("organizations").select("id").eq("admin_id", user.id).single();
-              if (!org) return;
+              if (!user) throw new Error("Not authenticated");
+
+              const { data: org } = await supabase
+                .from("organizations")
+                .select("id")
+                .eq("admin_id", user.id)
+                .single();
+              if (!org) throw new Error("Organization not found");
 
               const fileExt = file.name.split('.').pop();
-              const fileName = `${id}.${fileExt}`;
-              const filePath = `${org.id}/${fileName}`;
+              // Unique filename scoped under org folder (satisfies Storage RLS)
+              const filePath = `${org.id}/staff_${id}_${Date.now()}.${fileExt}`;
 
+              // Step 1: Upload
               const { error: uploadError } = await supabase.storage
                 .from('staff-photos')
                 .upload(filePath, file, { upsert: true });
 
-              if (uploadError) throw uploadError;
+              if (uploadError) {
+                console.error('Upload error:', uploadError);
+                throw new Error(`Upload failed: ${uploadError.message}`);
+              }
 
+              // Step 2: Get public URL immediately after upload
               const { data: { publicUrl } } = supabase.storage
                 .from('staff-photos')
                 .getPublicUrl(filePath);
 
-              const { error: updateError } = await supabase.from("staff").update({ photo_url: publicUrl }).eq("id", id);
-              if (updateError) throw updateError;
+              if (!publicUrl) throw new Error("Could not generate public URL");
 
-              showToast(`Verification photo saved for ${selectedStaff.name}`);
+              // Step 3: Database sync — only return success if this completes
+              const { error: updateError } = await supabase
+                .from("staff")
+                .update({ photo_url: publicUrl })
+                .eq("id", id);
+
+              if (updateError) {
+                console.error('DB update error:', updateError);
+                throw new Error(`Database update failed: ${updateError.message}`);
+              }
+
+              showToast(`Verification photo saved for ${selectedStaff!.name}`);
               await loadStaff();
-              // Update local state to show photo immediately
-              setSelectedStaff({...selectedStaff, photo_url: publicUrl});
-            } catch (err) {
-              console.error(err);
-              showToast("Failed to upload photo", "error");
+              setSelectedStaff(prev => prev ? {...prev, photo_url: publicUrl} : prev);
+
+              return 'Success';
+            } catch (err: any) {
+              console.error('Photo upload failed:', err);
+              showToast(err.message || "Failed to upload photo", "error");
             }
           }}
           onSendLink={handleSendVerificationLink}

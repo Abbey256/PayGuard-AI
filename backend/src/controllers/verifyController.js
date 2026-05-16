@@ -25,45 +25,52 @@ export async function validateToken(req, res, next) {
   try {
     const { token } = req.params;
 
-    // Fetch the verification request and join staff + organizations in one query.
-    const { data, error } = await supabase
+    // Step 1: Fetch the verification request and the staff_id linked to this token.
+    const { data: verReq, error: verReqError } = await supabase
       .from("verification_requests")
-      .select(
-        `
-        id,
-        status,
-        token_expires_at,
-        staff (
-          first_name,
-          last_name,
-          photo_url,
-          organizations (
-            name
-          )
-        )
-      `
-      )
+      .select("id, status, token_expires_at, staff_id")
       .eq("token", token)
       .single();
 
-    if (error || !data) {
+    if (verReqError || !verReq) {
       return res.status(404).json({ message: "Verification link not found" });
     }
 
-    // Completed status takes priority over expiry check (Requirement 18.6).
-    if (data.status === "completed") {
+    // Completed status takes priority over expiry check.
+    if (verReq.status === "completed") {
       return res.status(409).json({ message: "Verification already completed" });
     }
 
     // Check expiry.
-    if (new Date(data.token_expires_at) < new Date()) {
+    if (new Date(verReq.token_expires_at) < new Date()) {
       return res.status(410).json({ message: "Verification link has expired" });
     }
 
-    // Build response values from joined tables.
-    const workerName = `${data.staff.first_name} ${data.staff.last_name}`;
-    const organizationName = data.staff.organizations?.name ?? "";
-    const photoUrl = data.staff.photo_url;
+    // Step 2: Fetch the staff record directly by id — this guarantees photo_url
+    // is always read, regardless of whether the FK join to organizations works.
+    const { data: staff, error: staffError } = await supabase
+      .from("staff")
+      .select("first_name, last_name, photo_url, organization_id")
+      .eq("id", verReq.staff_id)
+      .single();
+
+    if (staffError || !staff) {
+      return res.status(404).json({ message: "Staff record not found" });
+    }
+
+    // Step 3: Fetch organization name (non-fatal if it fails).
+    let organizationName = "";
+    if (staff.organization_id) {
+      const { data: org } = await supabase
+        .from("organizations")
+        .select("name")
+        .eq("id", staff.organization_id)
+        .single();
+      organizationName = org?.name ?? "";
+    }
+
+    const workerName = `${staff.first_name ?? ""} ${staff.last_name ?? ""}`.trim();
+    const photoUrl = staff.photo_url ?? null;
 
     return res.status(200).json({ workerName, organizationName, photoUrl });
   } catch (error) {

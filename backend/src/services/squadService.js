@@ -1,5 +1,7 @@
 import "dotenv/config";
 import axios from "axios";
+import natural from "natural";
+import { supabase } from "./supabaseClient.js";
 
 const SQUAD_BASE_URL = "https://sandbox-api-d.squadco.com";
 const SQUAD_SECRET_KEY = process.env.SQUAD_SECRET_KEY;
@@ -249,13 +251,177 @@ export async function simulateVirtualAccountCredit(virtualAccountNumber, amountK
   }
 }
 
+/**
+ * Prevent 'Identity Swapping' before a payout.
+ * Looks up the account name via Squad API and compares it to the legal name.
+ * 
+ * @param {Object} params
+ * @param {string} params.staffId - Staff ID for logging
+ * @param {string} params.legalName - Staff's legal name from the payroll database
+ * @param {string} params.accountNumber - Staff's bank account number
+ * @param {string} params.bankCode - Staff's bank code
+ * @returns {Promise<Object>} Verification result
+ */
+export async function guardIdentitySwap({ staffId, legalName, accountNumber, bankCode }) {
+  // 1. Squad Lookup
+  const resolveRes = await verifyAccountName(accountNumber, bankCode);
+  if (!resolveRes.success) {
+    return { 
+      success: false, 
+      error: `Failed to resolve bank account for identity check: ${resolveRes.error}` 
+    };
+  }
+
+  const squadAccountName = resolveRes.data.accountName;
+
+  // 2. Fuzzy Matching
+  // Using Jaro-Winkler distance to compare names.
+  // It handles typos and minor variations well. Score is between 0 and 1.
+  const jaroScore = natural.JaroWinklerDistance(
+    legalName.toLowerCase(), 
+    squadAccountName.toLowerCase()
+  );
+
+  // A score below 0.7 generally indicates a significant mismatch for names.
+  const isMismatch = jaroScore < 0.7;
+
+  // 3. The Guard
+  if (isMismatch) {
+    // 4. Flagging
+    try {
+      await supabase.from("verification_logs").insert({
+        staff_id: staffId,
+        event: "High Risk: Name Mismatch",
+        details: `Identity Swap Prevented: Legal Name '${legalName}' vs Account Name '${squadAccountName}' (Score: ${jaroScore.toFixed(2)})`
+      });
+    } catch (err) {
+      console.error("Failed to log verification mismatch:", err);
+    }
+
+    return {
+      success: false,
+      error: `Identity Mismatch: Bank account name (${squadAccountName}) does not match legal name (${legalName}). Transaction locked.`,
+      isMismatch: true
+    };
+  }
+
+  return { 
+    success: true, 
+    data: { 
+      squadAccountName, 
+      matchScore: jaroScore 
+    } 
+  };
+}
+
+/**
+ * Process HR-triggered payout securely.
+ * Final gate for PayGuard AI. Ensures bank account name matches payroll name.
+ * @param {string} staffId 
+ */
+export async function processHRPayout(staffId) {
+  try {
+    // Pre-check: Fetch the staff record from the database (Using Supabase client)
+    const { data: staff, error: staffError } = await supabase
+      .from('staff')
+      .select('*')
+      .eq('id', staffId)
+      .single();
+
+    if (staffError || !staff) {
+      throw new Error("Staff record not found.");
+    }
+
+    if (staff.verification_status !== 'LIVENESS_PASSED') {
+      throw new Error("Biometric verification required before payout.");
+    }
+
+    // Squad API Integration
+    const resolveRes = await axios.get("https://sandbox.squad.ng/accounts/resolve", {
+      headers: {
+        Authorization: `Bearer ${process.env.SQUAD_SECRET_KEY}`,
+        "Content-Type": "application/json"
+      },
+      params: {
+        account_number: staff.account_number || staff.employee_id, // Fallback fields
+        bank_code: staff.bank_code
+      }
+    });
+
+    const squadAccountName = resolveRes.data?.data?.account_name || "";
+    const legalName = staff.legal_name || staff.name || "";
+
+    // Fuzzy Name Matching
+    const normSquad = squadAccountName.toUpperCase().trim();
+    const normLegal = legalName.toUpperCase().trim();
+
+    const distance = natural.LevenshteinDistance(normSquad, normLegal);
+
+    // Threshold Guard
+    if (distance > 4) {
+      // The Guard (Mismatch Logic)
+      await supabase.from('verification_logs').insert({
+        staff_id: staffId,
+        status: 'LOCKED',
+        risk_level: 'CRITICAL',
+        event: 'IDENTITY_SWAP_ATTEMPT'
+      });
+
+      await supabase.from('staff').update({
+        verification_status: 'FLAGGED_FOR_FRAUD'
+      }).eq('id', staffId);
+
+      throw new Error("FRAUD ALERT: Bank account name does not match legal payroll name. Transaction has been locked.");
+    }
+
+    // The Payout (Success Logic)
+    const currentDate = new Date().toISOString().split('T')[0];
+    const idempotencyKey = `pay_${staffId}_${currentDate}`;
+
+    await axios.post("https://sandbox.squad.ng/transfer", {
+      amount: staff.salary_amount || staff.amount || 0,
+      bank_code: staff.bank_code,
+      account_number: staff.account_number,
+      account_name: squadAccountName,
+      idempotency_key: idempotencyKey,
+      currency: "NGN",
+      remark: "PayGuard AI HR Payout"
+    }, {
+      headers: {
+        Authorization: `Bearer ${process.env.SQUAD_SECRET_KEY}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    await supabase.from('staff').update({
+      verification_status: 'PAID'
+    }).eq('id', staffId);
+
+    return {
+      success: true,
+      message: "Payout successful",
+      status: "PAID"
+    };
+
+  } catch (error) {
+    // Error Handling
+    return {
+      success: false,
+      message: error.message || "An unexpected error occurred.",
+      status: "FAILED"
+    };
+  }
+}
+
 export default {
   createVirtualAccount,
   verifyAccountName,
   initiateTransfer,
   createSubAccount,
   simulateVirtualAccountTransaction,
-  simulateVirtualAccountCredit
+  simulateVirtualAccountCredit,
+  guardIdentitySwap,
+  processHRPayout
 };
 
 

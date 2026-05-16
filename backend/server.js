@@ -12,7 +12,9 @@ import employeeRoutes from "./src/routes/employeeRoutes.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// Trust proxy — required when behind ngrok / reverse proxy
+// Fixes: ERR_ERL_UNEXPECTED_X_FORWARDED_FOR from express-rate-limit
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

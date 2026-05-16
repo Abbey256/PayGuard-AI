@@ -30,11 +30,12 @@ router.post("/send", authMiddleware, async (req, res, next) => {
     // Fetch the staff record to confirm it exists and get their name
     const { data: staff, error: staffError } = await supabase
       .from("staff")
-      .select("id, name, organization_id")
+      .select("id, name, first_name, last_name, organization_id")
       .eq("id", staffId)
       .single();
 
     if (staffError || !staff) {
+      console.error("Staff fetch error:", staffError);
       return res.status(404).json({ success: false, message: "Staff member not found" });
     }
 
@@ -42,36 +43,41 @@ router.post("/send", authMiddleware, async (req, res, next) => {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
 
-    // --- DEDUP: expire any existing non-completed requests for this staff ---
-    // This ensures there is always exactly ONE active verification request per
-    // staff member. Previous duplicates are marked expired so they no longer
-    // appear as pending or sent in the Verification Center.
-    const { error: expireError } = await supabase
+    // DEDUP: expire any existing non-completed requests for this staff
+    await supabase
       .from("verification_requests")
       .update({ status: "expired", token_expires_at: new Date().toISOString() })
       .eq("staff_id", staffId)
       .in("status", ["pending", "sent"]);
+    // Non-fatal — don't check error here
 
-    if (expireError) {
-      console.error("Failed to expire old verification requests:", expireError);
-      // Non-fatal — still proceed with creating the new one
-    }
-
-    // Insert a single fresh verification_request for this staff member
-    const { error: insertError } = await supabase
+    // Insert a fresh verification_request
+    const { data: inserted, error: insertError } = await supabase
       .from("verification_requests")
       .insert({
         staff_id: staff.id,
         token,
         token_expires_at: expiresAt,
         status: "pending",
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error("❌ verification_requests insert failed:", JSON.stringify(insertError, null, 2));
+      return res.status(500).json({
+        success: false,
+        message: `Database error: ${insertError.message} [${insertError.code}]`,
+        detail: insertError.details ?? insertError.hint ?? null,
       });
+    }
 
-    if (insertError) throw insertError;
+    console.log("✅ Verification request created:", inserted?.id);
 
-    // Send the email
+    // Send the email — use name or fall back to first+last
+    const displayName = staff.name || `${staff.first_name ?? ""} ${staff.last_name ?? ""}`.trim() || "Staff Member";
     const emailResult = await emailService.sendVerificationEmail({
-      full_name: staff.name,
+      full_name: displayName,
       email: email,
       verification_token: token,
     });
@@ -89,6 +95,7 @@ router.post("/send", authMiddleware, async (req, res, next) => {
       message: `Verification email sent to ${email}`,
     });
   } catch (error) {
+    console.error("❌ /api/verification/send unexpected error:", error);
     next(error);
   }
 });

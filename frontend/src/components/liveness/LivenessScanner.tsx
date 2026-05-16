@@ -13,275 +13,340 @@ import {
   SmileState,
 } from './challengeEngine';
 import { computeTrustScore } from './trustScore';
-import * as faceapi from 'face-api.js';
+import {
+  buildEmbedding,
+  calculateSimilarity,
+  verifyHardwareCamera,
+  LandmarkVector,
+  SIMILARITY_THRESHOLDS,
+} from './faceVerification';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface VerificationResult {
   verdict: 'verified' | 'flagged';
   trustScore: number;
 }
 
+type Stage =
+  | 'tap_to_begin'
+  | 'initializing'
+  | 'hardware_check'
+  | 'positioning'
+  | 'blink'
+  | 'headTurn'
+  | 'smile'
+  | 'completing'
+  | 'finished'
+  | 'failed'
+  | 'blocked_virtual_cam';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Speech synthesis helper
+// ─────────────────────────────────────────────────────────────────────────────
+
 const synth = window.speechSynthesis;
 
 const speak = (text: string, onEnd?: () => void) => {
-  if (!synth) {
-    if (onEnd) onEnd();
-    return;
-  }
+  if (!synth) { if (onEnd) onEnd(); return; }
   synth.cancel();
 
   const utterance = new SpeechSynthesisUtterance(text);
-  
-  const voices = synth.getVoices();
-  const femaleVoice = voices.find(v => 
-    v.name.includes('Female') || 
+  const voices    = synth.getVoices();
+  const femaleVoice = voices.find(v =>
+    v.name.includes('Female') ||
     v.name.includes('Samantha') ||
     v.name.includes('Google UK English Female') ||
     v.name.includes('Microsoft Zira') ||
-    v.name.includes('Karen')
+    v.name.includes('Karen'),
   );
   if (femaleVoice) utterance.voice = femaleVoice;
-  
-  utterance.lang = 'en-GB';
-  utterance.rate = 0.85;
-  utterance.pitch = 1.1;
+  utterance.lang   = 'en-GB';
+  utterance.rate   = 0.85;
+  utterance.pitch  = 1.1;
   utterance.volume = 1;
-  
+
   if (onEnd) {
     let fired = false;
-    const fallbackTime = text.length * 80 + 1500; // rough duration
-    
+    const fallbackTime = text.length * 80 + 1500;
     const fallbackTimer = setTimeout(() => {
-      if (!fired) {
-        fired = true;
-        onEnd();
-      }
+      if (!fired) { fired = true; onEnd(); }
     }, fallbackTime);
 
     utterance.onend = () => {
-      if (!fired) {
-        fired = true;
-        clearTimeout(fallbackTimer);
-        setTimeout(onEnd, 100);
-      }
+      if (!fired) { fired = true; clearTimeout(fallbackTimer); setTimeout(onEnd, 100); }
     };
     utterance.onerror = () => {
-      if (!fired) {
-        fired = true;
-        clearTimeout(fallbackTimer);
-        onEnd();
-      }
+      if (!fired) { fired = true; clearTimeout(fallbackTimer); onEnd(); }
     };
   }
-  
+
   synth.speak(utterance);
 };
 
-type Stage = 'tap_to_begin' | 'initializing' | 'positioning' | 'blink' | 'headTurn' | 'smile' | 'completing' | 'finished' | 'failed';
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: extract reference embedding from a photo URL via MediaPipe
+// ─────────────────────────────────────────────────────────────────────────────
 
-export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: string; adminPhotoUrl?: string; onComplete: (res: VerificationResult) => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+/**
+ * Renders an image URL onto an OffscreenCanvas (or a regular canvas) and feeds
+ * it to a one-shot FaceMesh instance to extract landmark data.
+ * Returns null if no face is detected.
+ */
+async function extractReferenceEmbedding(photoUrl: string): Promise<LandmarkVector | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = img.naturalWidth  || 640;
+      canvas.height = img.naturalHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(null); return; }
+      ctx.drawImage(img, 0, 0);
+
+      const fm = new FaceMesh({
+        locateFile: (file: string) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+      });
+
+      fm.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: false,
+        minDetectionConfidence: 0.4,
+        minTrackingConfidence: 0.4,
+      });
+
+      let resolved = false;
+
+      fm.onResults((results: any) => {
+        if (resolved) return;
+        resolved = true;
+        fm.close();
+
+        const lms = results.multiFaceLandmarks?.[0];
+        if (!lms) {
+          console.warn('[PayGuard] No face detected in reference photo.');
+          resolve(null);
+          return;
+        }
+        resolve(buildEmbedding(lms));
+      });
+
+      // Give MediaPipe a moment to initialise before sending
+      setTimeout(async () => {
+        try {
+          await fm.send({ image: canvas });
+        } catch (err) {
+          console.error('[PayGuard] Reference extraction FaceMesh.send failed:', err);
+          if (!resolved) { resolved = true; fm.close(); resolve(null); }
+        }
+      }, 300);
+    };
+
+    img.onerror = (e) => {
+      console.error('[PayGuard] Reference photo load failed (CORS?):', e);
+      resolve(null);
+    };
+
+    img.src = photoUrl;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function LivenessScanner({
+  token,
+  adminPhotoUrl,
+  onComplete,
+}: {
+  token: string;
+  adminPhotoUrl?: string;
+  onComplete: (res: VerificationResult) => void;
+}) {
+  const videoRef    = useRef<HTMLVideoElement>(null);
   const faceMeshRef = useRef<any>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const streamRef   = useRef<MediaStream | null>(null);
 
-  const [stage, setStage] = useState<Stage>('tap_to_begin');
-  const [feedback, setFeedback] = useState('Tap anywhere to begin');
+  const [stage,       setStage]       = useState<Stage>('tap_to_begin');
+  const [feedback,    setFeedback]    = useState('Tap anywhere to begin');
   const [faceDetected, setFaceDetected] = useState(false);
-  const [trustScore, setTrustScore] = useState<number | null>(null);
+  const [trustScore,  setTrustScore]  = useState<number | null>(null);
+  const [identityAlert, setIdentityAlert] = useState<string | null>(null);
 
-  // Refs for state machine inside requestAnimationFrame / onResults
-  const stageRef = useRef<Stage>('tap_to_begin');
+  // Refs that are safe to read inside rAF / onResults callbacks
+  const stageRef          = useRef<Stage>('tap_to_begin');
   const detectionActiveRef = useRef(false);
-  
-  // Tracking challenges
-  const challengesPassed = useRef(0);
+  const challengesPassed   = useRef(0);
   const positioningStartMs = useRef<number | null>(null);
-  const faceApiLoaded = useRef(false);
-  
-  
-  const blinkState = useRef<BlinkState>({ eyeClosed: false, blinkCount: 0 });
-  const headTurnState = useRef<HeadTurnState>({ leftDetected: false, passed: false });
-  const smileState = useRef<SmileState>({ smileStartMs: null, passed: false });
-  const lastProcessedTime = useRef(0);
-  const hasStaticFace = useRef(true);
-  const faceApiLoadingPromise = useRef<Promise<void> | null>(null);
 
-  // -----------------------------------------------------------------------
-  // Start loading face-api models IMMEDIATELY on mount (not on tap)
-  // so they are ready by the time challenges finish.
-  // -----------------------------------------------------------------------
+  // Reference embedding (from the ID/NIN photo) — built once on mount
+  const referenceEmbedRef = useRef<LandmarkVector | null>(null);
+  const refEmbedLoadedRef = useRef(false);
+  const refEmbedPromiseRef = useRef<Promise<void> | null>(null);
+
+  // Live landmark buffer — kept updated by onResults, consumed at finish
+  const latestLandmarksRef = useRef<any[] | null>(null);
+
+  const blinkState    = useRef<BlinkState>({ eyeClosed: false, blinkCount: 0 });
+  const headTurnState = useRef<HeadTurnState>({ leftDetected: false, passed: false });
+  const smileState    = useRef<SmileState>({ smileStartMs: null, passed: false });
+  const lastProcessedTime = useRef(0);
+
+  // ── Pre-load reference embedding immediately on mount ────────────────────
   useEffect(() => {
     if (!adminPhotoUrl) {
       console.warn('[PayGuard] No adminPhotoUrl — face match will BLOCK verification.');
       return;
     }
-    console.log('[PayGuard] Starting face-api model download immediately...');
-    const weightsUrl = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
-    faceApiLoadingPromise.current = Promise.all([
-      faceapi.nets.ssdMobilenetv1.loadFromUri(weightsUrl),
-      faceapi.nets.faceLandmark68Net.loadFromUri(weightsUrl),
-      faceapi.nets.faceRecognitionNet.loadFromUri(weightsUrl),
-    ]).then(() => {
-      faceApiLoaded.current = true;
-      console.log('[PayGuard] Face-API models loaded ✅');
-    }).catch(err => {
-      console.error('[PayGuard] Face-API models FAILED to load ❌', err);
-      faceApiLoadingPromise.current = null;
+    console.log('[PayGuard] Pre-loading reference embedding from photo...');
+    refEmbedPromiseRef.current = extractReferenceEmbedding(adminPhotoUrl).then(embed => {
+      if (embed) {
+        referenceEmbedRef.current = embed;
+        refEmbedLoadedRef.current = true;
+        console.log(`[PayGuard] Reference embedding ready ✅  (${embed.length} dims)`);
+      } else {
+        console.error('[PayGuard] Reference embedding extraction failed ❌');
+      }
     });
   }, [adminPhotoUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const advanceStage = useCallback((newStage: Stage, feedbackText: string, speechText: string) => {
+  // ── Stage advancement helper ─────────────────────────────────────────────
+  const advanceStage = useCallback((
+    newStage: Stage,
+    feedbackText: string,
+    speechText: string,
+  ) => {
     setStage(newStage);
-    stageRef.current = newStage;
+    stageRef.current      = newStage;
     setFeedback(feedbackText);
-    detectionActiveRef.current = false; // Pause detection while speaking
-    
+    detectionActiveRef.current = false; // Pause while speaking
+
     speak(speechText, () => {
-      detectionActiveRef.current = true; // Resume detection after speaking
+      detectionActiveRef.current = true; // Resume after speech
     });
   }, []);
 
-    const handleTapToBegin = () => {
+  // ── Tap-to-begin handler ─────────────────────────────────────────────────
+  const handleTapToBegin = () => {
     if (stage !== 'tap_to_begin') return;
-    
-    // Unlock audio context by speaking an empty string during the user gesture
-    const unlockUtterance = new SpeechSynthesisUtterance(' ');
-    unlockUtterance.volume = 0; // quiet
-    synth.speak(unlockUtterance);
-    
+
+    // Unlock AudioContext during user gesture
+    const unlock = new SpeechSynthesisUtterance(' ');
+    unlock.volume = 0;
+    synth.speak(unlock);
+
     setStage('initializing');
     stageRef.current = 'initializing';
     setFeedback('Starting camera and AI...');
     initCameraAndAI();
-    // Face-api models are already loading from the useEffect above — no need to restart here.
   };
 
+  // ── Capture current video frame as base64 JPEG ───────────────────────────
   const captureSnapshot = (): string | null => {
     if (!videoRef.current) return null;
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth;
+    canvas.width  = videoRef.current.videoWidth;
     canvas.height = videoRef.current.videoHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    
-    // Draw video frame to canvas
-    // Flip horizontally because the video is flipped via CSS scale-x-[-1]
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-    
-    // Return base64 JPEG (smaller size for backend)
     return canvas.toDataURL('image/jpeg', 0.8);
   };
 
+  // ── Core: finish and evaluate ─────────────────────────────────────────────
   const finishVerification = async (passedCount: number) => {
     advanceStage('completing', 'Processing...', 'Thank you. Processing your verification.');
-    
-    // Capture snapshot for backend face matching
+
     const snapshotBase64 = captureSnapshot();
 
-    const result = computeTrustScore({
+    // Base liveness score
+    const livenessResult = computeTrustScore({
       challengesPassed: passedCount,
       staticFaceDetected: false,
     });
 
-    let finalVerdict = result.verdict;
-    let finalTrustScore = result.trustScore;
+    let finalVerdict:    'verified' | 'flagged' = livenessResult.verdict;
+    let finalTrustScore: number                 = livenessResult.trustScore;
 
-    console.log(`[PayGuard] finishVerification: liveness score=${finalTrustScore}, adminPhotoUrl=${adminPhotoUrl ? 'SET' : 'MISSING'}`);
+    console.log(`[PayGuard] Liveness score=${finalTrustScore}, adminPhotoUrl=${adminPhotoUrl ? 'SET' : 'MISSING'}`);
 
-    // HARD BLOCK: If no reference photo exists, we cannot verify this person's identity.
-    // Flag immediately — liveness alone is not enough for payment authorisation.
+    // ── HARD BLOCK: no reference photo → cannot verify identity ──────────
     if (!adminPhotoUrl) {
-      console.error('[PayGuard] No reference photo — cannot verify identity. Flagging.');
-      finalVerdict = 'flagged';
+      console.error('[PayGuard] No reference photo — identity cannot be confirmed. Flagging.');
+      finalVerdict    = 'flagged';
       finalTrustScore = 0;
-      // Skip face matching, submit result
     } else {
-      // If models are still loading, wait up to 30 seconds
-      if (faceApiLoadingPromise.current && !faceApiLoaded.current) {
-        setFeedback('Loading face recognition AI...');
-        console.log('[PayGuard] Waiting for face-api models...');
-        const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 30000));
-        await Promise.race([faceApiLoadingPromise.current, timeoutPromise]);
-        console.log(`[PayGuard] After wait: faceApiLoaded=${faceApiLoaded.current}`);
+      // Wait for reference embedding to finish loading (up to 30 s)
+      if (refEmbedPromiseRef.current && !refEmbedLoadedRef.current) {
+        setFeedback('Loading reference photo...');
+        const timeout = new Promise<void>(r => setTimeout(r, 30_000));
+        await Promise.race([refEmbedPromiseRef.current, timeout]);
       }
 
-      // --- REAL FACE MATCHING ---
-      setFeedback('Comparing face with database...');
-
-      if (!faceApiLoaded.current) {
-        console.error('[PayGuard] Face-API models not loaded after wait — flagging.');
-        finalVerdict = 'flagged';
+      if (!refEmbedLoadedRef.current || !referenceEmbedRef.current) {
+        console.error('[PayGuard] Reference embedding unavailable after wait — flagging.');
+        finalVerdict    = 'flagged';
         finalTrustScore = Math.min(finalTrustScore, 35);
-      } else if (snapshotBase64) {
-        try {
-          console.log('[PayGuard] Running face comparison...');
-          const snapshotImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = (e) => { console.error('[PayGuard] Snapshot image load failed', e); reject(e); };
-            img.src = snapshotBase64;
-          });
-
-          const adminImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => resolve(img);
-            img.onerror = (e) => { console.error('[PayGuard] Admin photo load failed (CORS?)', e); reject(e); };
-            img.src = adminPhotoUrl;
-          });
-
-          const snapshotDetection = await faceapi
-            .detectSingleFace(snapshotImg)
-            .withFaceLandmarks()
-            .withFaceDescriptor();
-
-          const adminDetection = await faceapi
-            .detectSingleFace(adminImg)
-            .withFaceLandmarks()
-            .withFaceDescriptor();
-
-          console.log(`[PayGuard] Detections: snapshot=${!!snapshotDetection}, admin=${!!adminDetection}`);
-
-          if (snapshotDetection && adminDetection) {
-            const distance = faceapi.euclideanDistance(
-              snapshotDetection.descriptor,
-              adminDetection.descriptor
-            );
-            const matchConfidence = Math.max(0, Math.round((1 - distance) * 100));
-            console.log(`[PayGuard] Face distance=${distance.toFixed(3)}, matchConfidence=${matchConfidence}%`);
-
-            if (distance > 0.55) {
-              finalVerdict = 'flagged';
-              finalTrustScore = Math.min(finalTrustScore, Math.round(matchConfidence * 0.4));
-            } else {
-              finalTrustScore = Math.round((finalTrustScore * 0.5) + (matchConfidence * 0.5));
-              finalTrustScore = Math.min(100, finalTrustScore);
-            }
-          } else {
-            console.warn('[PayGuard] Could not detect face in snapshot or admin photo — flagging.');
-            finalVerdict = 'flagged';
-            finalTrustScore = Math.min(finalTrustScore, 30);
-          }
-        } catch (err) {
-          console.error('[PayGuard] Face match error — flagging:', err);
-          finalVerdict = 'flagged';
-          finalTrustScore = Math.min(finalTrustScore, 30);
-        }
       } else {
-        console.error('[PayGuard] No snapshot captured — flagging.');
-        finalVerdict = 'flagged';
-        finalTrustScore = 0;
+        // ── 1:1 FACE VERIFICATION ─────────────────────────────────────────
+        setFeedback('Comparing face with database...');
+
+        const liveLandmarks = latestLandmarksRef.current;
+        if (!liveLandmarks) {
+          console.error('[PayGuard] No live landmarks captured — flagging.');
+          finalVerdict    = 'flagged';
+          finalTrustScore = 0;
+        } else {
+          const simResult = calculateSimilarity(liveLandmarks, referenceEmbedRef.current);
+
+          console.log(
+            `[PayGuard] Cosine similarity=${simResult.score.toFixed(4)}, ` +
+            `verdict=${simResult.verdict}, trustScore=${simResult.trustScore}`,
+          );
+
+          if (simResult.verdict === 'mismatch') {
+            // Score < 0.80 — hard mismatch
+            finalVerdict    = 'flagged';
+            finalTrustScore = 0; // Zeroed per spec
+            setIdentityAlert(simResult.alert);
+            speak('Identity mismatch detected. Verification blocked.');
+
+          } else if (simResult.verdict === 'uncertain') {
+            // 0.80 ≤ score < 0.85 — uncertain, flag but keep partial score
+            finalVerdict    = 'flagged';
+            finalTrustScore = Math.min(finalTrustScore, simResult.trustScore);
+            setIdentityAlert(simResult.alert);
+
+          } else {
+            // score ≥ 0.85 — identity confirmed, blend liveness + match scores
+            finalTrustScore = Math.min(
+              100,
+              Math.round(livenessResult.trustScore * 0.5 + simResult.trustScore * 0.5),
+            );
+            // Only keep 'verified' verdict if liveness also passed
+            if (livenessResult.verdict !== 'verified') finalVerdict = 'flagged';
+          }
+        }
       }
-    } // end else (adminPhotoUrl exists)
+    }
 
-
+    // ── Submit to backend for audit logging ───────────────────────────────
     try {
       let apiUrl = import.meta.env.VITE_API_URL || '';
-      if (!apiUrl || apiUrl.startsWith('/')) {
-        apiUrl = window.location.origin;
-      }
-      if (window.location.protocol === 'https:' && apiUrl.startsWith('http://') && !apiUrl.includes('localhost')) {
+      if (!apiUrl || apiUrl.startsWith('/')) apiUrl = window.location.origin;
+      if (
+        window.location.protocol === 'https:' &&
+        apiUrl.startsWith('http://') &&
+        !apiUrl.includes('localhost')
+      ) {
         apiUrl = apiUrl.replace('http://', 'https://');
       }
 
@@ -290,28 +355,28 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
         trustScore: finalTrustScore,
         verdict: finalVerdict,
         livenessData: {
-          blinkDetected: passedCount >= 1,
+          blinkDetected:    passedCount >= 1,
           headTurnDetected: passedCount >= 2,
-          smileDetected: passedCount >= 3,
+          smileDetected:    passedCount >= 3,
           challengesPassed: passedCount,
-          snapshot: snapshotBase64 // Sent to backend for audit logging
-        }
+          snapshot:         snapshotBase64,
+        },
       };
 
       await fetch(`${apiUrl}/api/verify/submit`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body:    JSON.stringify(payload),
       });
     } catch (err) {
-      console.error('Failed to submit verification', err);
+      console.error('[PayGuard] Failed to submit verification result:', err);
     }
 
     setTrustScore(finalTrustScore);
-    const finalStage = finalVerdict === 'verified' ? 'finished' : 'failed';
+    const finalStage: Stage = finalVerdict === 'verified' ? 'finished' : 'failed';
     setStage(finalStage);
     stageRef.current = finalStage;
-    
+
     if (finalVerdict === 'verified') {
       speak('Verification successful. Your salary will be processed.');
     } else {
@@ -321,55 +386,84 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
     onComplete({ verdict: finalVerdict, trustScore: finalTrustScore });
   };
 
+  // ── Camera & MediaPipe initialisation ─────────────────────────────────────
   const initCameraAndAI = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } 
+      // ── Step 1: Hardware camera lock ──────────────────────────────────────
+      setStage('hardware_check');
+      stageRef.current = 'hardware_check';
+      setFeedback('Verifying camera hardware...');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
       });
+
+      const hwCheck = await verifyHardwareCamera(stream);
+      if (!hwCheck.isHardware) {
+        // Stop the stream immediately — refuse virtual camera
+        stream.getTracks().forEach(t => t.stop());
+        console.error('[PayGuard] Hardware lock failed:', hwCheck.reason);
+
+        setStage('blocked_virtual_cam');
+        stageRef.current = 'blocked_virtual_cam';
+        setFeedback(`Camera Blocked — ${hwCheck.reason}`);
+        speak('A virtual camera was detected. Please use your device\'s built-in camera.');
+        // Fail the verification
+        onComplete({ verdict: 'flagged', trustScore: 0 });
+        return;
+      }
+
+      console.log('[PayGuard] Hardware camera verified ✅', hwCheck.reason);
+
+      // ── Step 2: Attach stream to video element ────────────────────────────
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
 
+      // ── Step 3: Initialise FaceMesh ───────────────────────────────────────
       const fm = new FaceMesh({
-        locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`
+        locateFile: (file: string) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
       });
-      
+
       fm.setOptions({
         maxNumFaces: 1,
         refineLandmarks: false,
         minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
+        minTrackingConfidence: 0.5,
       });
 
       fm.onResults((results: any) => {
         const landmarks = results.multiFaceLandmarks?.[0];
-        
+
         if (landmarks) {
           setFaceDetected(true);
+          // Always keep the latest live landmarks for identity comparison
+          latestLandmarksRef.current = landmarks;
         } else {
           setFaceDetected(false);
           positioningStartMs.current = null;
-          return; // Stop processing if no face
+          return;
         }
 
         const currentStage = stageRef.current;
-        const now = Date.now();
+        const now          = Date.now();
         if (now - lastProcessedTime.current < 1000 / 15) return; // Max 15 fps
         const deltaMs = now - (lastProcessedTime.current || now);
         lastProcessedTime.current = now;
 
-        // Stage 1: Wait for Mediapipe to load and transition to positioning
-        if (currentStage === 'initializing') {
+        // Transition out of 'initializing' on first detection
+        if (currentStage === 'initializing' || currentStage === 'hardware_check') {
           advanceStage('positioning', 'Position your face in the oval', 'Welcome. Position your face in the oval.');
           return;
         }
 
-        // If detection is paused (e.g. while speaking), skip challenge logic
+        // Pause detection while speech is playing
         if (!detectionActiveRef.current) return;
 
-        // Stage 2: Face detected for 2 seconds
+        // Stage: positioning — wait 2 s for stable face
         if (currentStage === 'positioning') {
           if (!positioningStartMs.current) positioningStartMs.current = now;
           if (now - positioningStartMs.current > 2000) {
@@ -377,37 +471,38 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
           }
         }
 
-        // Stage 3: Detect 2 blinks
+        // Stage: blink — detect 2 blinks
         if (currentStage === 'blink') {
-          const ear = (computeEAR(landmarks, { top: 159, bottom: 145, left: 33, right: 133 }) + 
-                       computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 })) / 2;
+          const ear =
+            (computeEAR(landmarks, { top: 159, bottom: 145, left: 33, right: 133 }) +
+             computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 })) / 2;
           blinkState.current = processBlink(blinkState.current, ear);
           setFeedback(`Blinks: ${blinkState.current.blinkCount}/2`);
-          
+
           if (blinkState.current.blinkCount >= 2) {
             challengesPassed.current += 1;
             advanceStage('headTurn', 'Turn head left, then right', 'Good. Now turn your head left, then right.');
           }
         }
 
-        // Stage 4: Detect Head Turn
+        // Stage: headTurn
         if (currentStage === 'headTurn') {
           const ratio = computeHeadRatio(landmarks);
           headTurnState.current = processHeadTurn(headTurnState.current, ratio);
           setFeedback(headTurnState.current.leftDetected ? 'Now turn right' : 'Turn head left');
-          
+
           if (headTurnState.current.passed) {
             challengesPassed.current += 1;
             advanceStage('smile', 'Smile for the camera', 'Perfect. Now smile for the camera.');
           }
         }
 
-        // Stage 5: Detect Smile
+        // Stage: smile
         if (currentStage === 'smile') {
           const mouthRatio = computeMouthRatio(landmarks);
           smileState.current = processSmile(smileState.current, mouthRatio, deltaMs);
           setFeedback(smileState.current.smileStartMs ? 'Hold smile...' : 'Smile for the camera');
-          
+
           if (smileState.current.passed) {
             challengesPassed.current += 1;
             finishVerification(challengesPassed.current);
@@ -417,23 +512,28 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
 
       faceMeshRef.current = fm;
 
+      // rAF detection loop
       const detectFace = async () => {
-        if (stageRef.current === 'finished' || stageRef.current === 'failed') return;
+        if (stageRef.current === 'finished' || stageRef.current === 'failed' || stageRef.current === 'blocked_virtual_cam') return;
         if (videoRef.current && videoRef.current.readyState >= 2) {
-          try {
-            await fm.send({ image: videoRef.current });
-          } catch (err) {}
+          try { await fm.send({ image: videoRef.current }); } catch (_) {}
         }
         requestAnimationFrame(detectFace);
       };
       detectFace();
 
-    } catch (e) {
-      console.error("Camera/MediaPipe init failed", e);
-      setFeedback('Camera access failed. Please refresh.');
+    } catch (e: any) {
+      console.error('[PayGuard] Camera/MediaPipe init failed:', e);
+      const msg = e?.name === 'NotAllowedError'
+        ? 'Camera permission denied. Please allow camera access and refresh.'
+        : 'Camera access failed. Please refresh.';
+      setFeedback(msg);
+      setStage('failed');
+      stageRef.current = 'failed';
     }
   };
 
+  // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       faceMeshRef.current?.close();
@@ -441,7 +541,25 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
     };
   }, []);
 
-  // UI Render
+  // ─────────────────────────────────────────────────────────────────────────
+  // UI: terminal states
+  // ─────────────────────────────────────────────────────────────────────────
+
+  if (stage === 'blocked_virtual_cam') {
+    return (
+      <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-8 text-center text-white">
+        <div className="w-24 h-24 rounded-full flex items-center justify-center mb-6 text-4xl bg-amber-500/20 text-amber-400">
+          📷
+        </div>
+        <h2 className="text-2xl font-bold mb-2 text-amber-400">Virtual Camera Detected</h2>
+        <p className="text-slate-400 max-w-sm">
+          PayGuard requires a physical hardware camera. Please disable your virtual camera
+          software and try again using your device's built-in webcam.
+        </p>
+      </div>
+    );
+  }
+
   if (stage === 'finished' || stage === 'failed') {
     const isSuccess = stage === 'finished';
     return (
@@ -449,30 +567,43 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
         <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 text-4xl ${isSuccess ? 'bg-emerald-500/20 text-emerald-500' : 'bg-red-500/20 text-red-500'}`}>
           {isSuccess ? '✓' : '×'}
         </div>
-        <h2 className="text-2xl font-bold mb-2">{isSuccess ? 'Verification Successful' : 'Verification Unsuccessful'}</h2>
-        <p className="text-slate-400 mb-8">Trust Score: <span className="text-white font-mono">{trustScore ?? 0}/100</span></p>
+        <h2 className="text-2xl font-bold mb-2">
+          {isSuccess ? 'Verification Successful' : 'Verification Unsuccessful'}
+        </h2>
+        <p className="text-slate-400 mb-4">
+          Trust Score: <span className="text-white font-mono">{trustScore ?? 0}/100</span>
+        </p>
+        {/* Identity alert banner */}
+        {identityAlert && (
+          <div className="mt-2 rounded-lg border border-red-500/40 bg-red-500/10 px-6 py-3 text-sm text-red-400 max-w-sm">
+            {identityAlert}
+          </div>
+        )}
       </div>
     );
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // UI: scanning screen
+  // ─────────────────────────────────────────────────────────────────────────
+
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans">
-      
+
+      {/* Tap-to-begin overlay */}
       {stage === 'tap_to_begin' && (
-        <div 
+        <div
           onClick={handleTapToBegin}
           className="absolute inset-0 z-[100] bg-[#0f172a] flex flex-col items-center justify-center p-8 text-center cursor-pointer select-none"
         >
           <div className="mb-12 animate-in fade-in zoom-in duration-700">
-            <div className="w-20 h-20 bg-emerald-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-emerald-500/20 mx-auto mb-4">
-              <span className="text-white text-3xl font-black">PG</span>
-            </div>
+            <img src="/logo.png" alt="PayGuard AI" className="h-20 w-auto object-contain mx-auto mb-4" />
             <h1 className="text-white text-3xl font-bold tracking-tight">PayGuard AI</h1>
           </div>
           <div className="space-y-6 mb-16">
             <div className="relative">
-               <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping scale-150" />
-               <div className="w-4 h-4 bg-emerald-500 rounded-full mx-auto relative z-10" />
+              <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping scale-150" />
+              <div className="w-4 h-4 bg-emerald-500 rounded-full mx-auto relative z-10" />
             </div>
             <div>
               <h2 className="text-white text-xl font-bold mb-2">Tap anywhere to begin</h2>
@@ -482,23 +613,38 @@ export function LivenessScanner({ token, adminPhotoUrl, onComplete }: { token: s
         </div>
       )}
 
+      {/* Hardware-check overlay */}
+      {stage === 'hardware_check' && (
+        <div className="absolute inset-0 z-[90] bg-[#0f172a]/80 flex flex-col items-center justify-center gap-4 text-white">
+          <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-slate-300 font-medium">Verifying camera hardware…</p>
+        </div>
+      )}
+
       {/* Camera Section */}
       <div className="h-[60%] relative bg-slate-900">
         <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover scale-x-[-1]" playsInline muted />
         <FaceGuide status={stage} faceDetected={faceDetected} />
+
+        {/* Similarity threshold indicator (visible during completing stage) */}
+        {stage === 'completing' && (
+          <div className="absolute bottom-4 left-0 right-0 flex justify-center">
+            <div className="bg-black/60 backdrop-blur rounded-full px-4 py-1 text-xs text-emerald-400 font-mono">
+              Comparing identity… threshold {Math.round(SIMILARITY_THRESHOLDS.PROCEED * 100)}%
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Instructions Section */}
       <div className="h-[40%] bg-[#0f172a] flex flex-col items-center justify-between p-8 pt-10 border-t border-white/5">
         <div className="text-center space-y-3 w-full">
-          <h2 className="text-white text-2xl font-bold tracking-tight">
-            {feedback}
-          </h2>
+          <h2 className="text-white text-2xl font-bold tracking-tight">{feedback}</h2>
         </div>
 
         <div className="flex flex-col items-center gap-8 w-full">
           <div className="flex items-center gap-2 opacity-40 grayscale hover:grayscale-0 transition cursor-default">
-            <div className="w-6 h-6 bg-white rounded-md flex items-center justify-center font-bold text-[#0f172a] text-xs">PG</div>
+            <img src="/logo.png" alt="PayGuard AI" className="h-6 w-auto object-contain" />
             <span className="text-white text-sm font-bold tracking-tight">PayGuard AI</span>
           </div>
         </div>

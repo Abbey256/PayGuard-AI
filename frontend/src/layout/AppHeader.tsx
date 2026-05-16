@@ -84,15 +84,7 @@ const AppHeader: React.FC = () => {
           </button>
 
           <Link to="/" className="lg:hidden flex items-center gap-2">
-            <ShieldCheck className="w-6 h-6 text-emerald-600" />
-            <div className="flex items-center gap-1">
-              <span className="text-xs font-bold text-gray-900 dark:text-white">
-                PayGuard
-              </span>
-              <span className="text-xs font-semibold text-white bg-emerald-600 px-1.5 py-0.5 rounded">
-                AI
-              </span>
-            </div>
+            <img src="/logo.png" alt="PayGuard AI" className="h-8" />
           </Link>
 
           <button

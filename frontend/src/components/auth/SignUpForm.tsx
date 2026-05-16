@@ -198,9 +198,7 @@ export default function SignUpForm() {
     return (
       <div className="mx-auto flex w-full max-w-xl flex-col items-center">
         <div className="mb-8 flex flex-col items-center text-center">
-          <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-[#16a34a] shadow-sm ring-1 ring-emerald-100">
-            <ShieldCheck className="h-8 w-8" />
-          </div>
+          <img src="/logo.png" alt="PayGuard AI Logo" className="mb-4 h-16 w-auto object-contain" />
           <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">PayGuard AI</h1>
           <p className="mt-2 text-sm text-gray-600 sm:text-base">Government Payroll Verification System</p>
         </div>
@@ -227,9 +225,7 @@ export default function SignUpForm() {
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col items-center">
       <div className="mb-8 flex flex-col items-center text-center">
-        <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-[#16a34a] shadow-sm ring-1 ring-emerald-100">
-          <ShieldCheck className="h-8 w-8" />
-        </div>
+        <img src="/logo.png" alt="PayGuard AI Logo" className="mb-4 h-16 w-auto object-contain" />
         <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">
           PayGuard AI
         </h1>

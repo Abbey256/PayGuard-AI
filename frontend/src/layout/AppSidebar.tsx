@@ -272,19 +272,9 @@ const AppSidebar: React.FC = () => {
       >
         <Link to="/" className="flex items-center gap-2">
           {isExpanded || isHovered || isMobileOpen ? (
-            <>
-              <ShieldCheck className="w-6 h-6 text-emerald-600" />
-              <div className="flex items-center gap-1">
-                <span className="text-sm font-bold text-gray-900 dark:text-white">
-                  PayGuard
-                </span>
-                <span className="text-xs font-semibold text-white bg-emerald-600 px-2 py-0.5 rounded">
-                  AI
-                </span>
-              </div>
-            </>
+            <img src="/logo.png" alt="PayGuard AI" className="h-8" />
           ) : (
-            <ShieldCheck className="w-6 h-6 text-emerald-600" />
+            <img src="/logo.png" alt="PG" className="h-8 w-8 object-contain" />
           )}
         </Link>
       </div>
