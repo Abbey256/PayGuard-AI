@@ -88,28 +88,30 @@ export function computeEAR(landmarks: Landmark[], eyeIndices: EyeIndices): numbe
  * Process a single EAR sample through the blink state machine.
  *
  * State transitions:
- *   - EAR < 0.2  → eye is closed  (eyeClosed = true)
- *   - EAR > 0.25 after being closed → blink counted, eye open again
+ *   - EAR < 0.25  → eye is closing/closed  (eyeClosed = true)
+ *   - EAR > 0.28 after being closed → blink counted, eye open again
  *   - blinkCount is monotonically non-decreasing
+ *
+ * Thresholds raised from 0.20/0.25 to 0.25/0.28 to reliably catch
+ * blinks on mobile cameras where EAR range is compressed.
  *
  * Requirements: 3.4, 3.5, 3.7
  */
 export function processBlink(state: BlinkState, ear: number): BlinkState {
-  if (ear <= 0.20) {
-    // Eye is closing / closed
+  // Raised close threshold — mobile EAR rarely drops below 0.20
+  if (ear <= 0.25) {
     return { ...state, eyeClosed: true };
   }
 
-  if (ear >= 0.25) {
+  // Raised open threshold with hysteresis gap
+  if (ear >= 0.28) {
     if (state.eyeClosed) {
-      // Eye has re-opened after being closed -> register blink
       return { eyeClosed: false, blinkCount: state.blinkCount + 1 };
     }
-    // Eye was already open
     return { ...state, eyeClosed: false };
   }
 
-  // EAR is in the hysteresis band (0.20 - 0.25) -> hold current state
+  // Hysteresis band (0.25–0.28) — hold current state
   return state;
 }
 

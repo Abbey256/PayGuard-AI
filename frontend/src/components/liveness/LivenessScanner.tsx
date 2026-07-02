@@ -202,10 +202,14 @@ async function extractReferenceEmbedding(photoUrl: string): Promise<LandmarkVect
 export function LivenessScanner({
   token,
   adminPhotoUrl,
+  challengeNonce,
+  serverChallengeSequence,
   onComplete,
 }: {
   token: string;
   adminPhotoUrl?: string;
+  challengeNonce?: string;          // signed nonce from server — REQUIRED for submit
+  serverChallengeSequence?: ChallengeType[]; // server-dictated order
   onComplete: (res: VerificationResult) => void;
 }) {
   const videoRef    = useRef<HTMLVideoElement>(null);
@@ -224,9 +228,12 @@ export function LivenessScanner({
   const challengesPassed   = useRef(0);
   const positioningStartMs = useRef<number | null>(null);
 
-  // Crypto-randomised challenge sequence — generated once per session
-  const challengeSequence = useRef<ChallengeType[]>(generateChallengeSequence());
-  const challengeIndexRef = useRef(0); // which challenge we're on
+  // Use server-dictated challenge sequence if available (production anti-fraud)
+  // Fall back to client-generated only in dev/offline mode
+  const challengeSequence = useRef<ChallengeType[]>(
+    serverChallengeSequence ?? generateChallengeSequence()
+  );
+  const challengeIndexRef = useRef(0);
 
   // Reference embedding (from the ID/NIN photo) — built once on mount
   const referenceEmbedRef = useRef<LandmarkVector | null>(null);
@@ -395,8 +402,10 @@ export function LivenessScanner({
 
       const payload = {
         token,
+        challengeNonce: challengeNonce ?? null,  // signed server nonce — required for valid submission
         trustScore: finalTrustScore,
         verdict: finalVerdict,
+        faceMatchScore: simResult?.trustScore ?? 0,
         livenessData: {
           blinkDetected:    passedCount >= 1,
           headTurnDetected: passedCount >= 2,
@@ -493,7 +502,7 @@ export function LivenessScanner({
 
         const currentStage = stageRef.current;
         const now          = Date.now();
-        if (now - lastProcessedTime.current < 1000 / 15) return; // Max 15 fps
+        if (now - lastProcessedTime.current < 1000 / 24) return; // Max 24 fps (was 15)
         const deltaMs = now - (lastProcessedTime.current || now);
         lastProcessedTime.current = now;
 
@@ -535,11 +544,13 @@ export function LivenessScanner({
 
         // Stage: blink
         if (currentStage === 'blink' && currentChallenge === 'blink') {
-          const ear =
-            (computeEAR(landmarks, { top: 159, bottom: 145, left: 33, right: 133 }) +
-             computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 })) / 2;
+          const leftEAR  = computeEAR(landmarks, { top: 159, bottom: 145, left: 33,  right: 133 });
+          const rightEAR = computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 });
+          const ear = (leftEAR + rightEAR) / 2;
           blinkState.current = processBlink(blinkState.current, ear);
-          setFeedback(`Blinks: ${blinkState.current.blinkCount}/2`);
+          // Show EAR in dev builds to help calibrate — remove for prod
+          const earDebug = import.meta.env.DEV ? ` (EAR: ${ear.toFixed(3)})` : '';
+          setFeedback(`Blinks: ${blinkState.current.blinkCount}/2${earDebug}`);
           if (blinkState.current.blinkCount >= 2) advanceToNextChallenge();
         }
 

@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { LivenessScanner, VerificationResult } from '../../components/liveness/LivenessScanner';
+import { ChallengeType } from '../../components/liveness/challengeEngine';
 
 type PageState = 'loading' | 'ready' | 'error' | 'done';
 
@@ -12,6 +13,8 @@ interface WorkerInfo {
   workerName: string;
   organizationName: string;
   photoUrl?: string;
+  challengeNonce?: string;
+  challengeSequence?: ChallengeType[];
 }
 
 export default function VerificationPage() {
@@ -72,6 +75,8 @@ export default function VerificationPage() {
           workerName: data.workerName ?? 'Employee',
           organizationName: data.organizationName ?? 'Your Organisation',
           photoUrl: data.photoUrl,
+          challengeNonce: data.challengeNonce,
+          challengeSequence: data.challengeSequence,
         });
         setPageState('ready');
       } catch (err: unknown) {
@@ -255,6 +260,8 @@ export default function VerificationPage() {
         <LivenessScanner 
           token={token} 
           adminPhotoUrl={workerInfo?.photoUrl}
+          challengeNonce={workerInfo?.challengeNonce}
+          serverChallengeSequence={workerInfo?.challengeSequence}
           onComplete={handleComplete} 
         />
       )}
