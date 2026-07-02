@@ -204,12 +204,7 @@ async function processPayment(req, res, next) {
 
     await supabase
       .from("payment_batches")
-      .update({ 
-        status: "processed",
-        processed_at: new Date().toISOString(),
-        total_paid: paidCount,
-        total_amount_disbursed: totalDisbursedNaira
-      })
+      .update({ status: "processed" })
       .eq("id", batchId);
 
     const remainingBalanceNaira = currentWalletBalanceKobo / 100;
@@ -277,11 +272,13 @@ async function createPaymentBatch(req, res, next) {
       });
     }
 
-    // 3. Find existing pending batch for this org this month, or create new one
-    const monthLabel  = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    const name        = batchName || `${monthLabel} Payroll`;
+    const totalAmount = verifiedStaff.reduce((sum, s) => sum + (s.salary || 0), 0);
 
-    // Check for existing pending batch to avoid duplicates
+    // 3. Find existing pending batch for this org, or create new one
+    const monthLabel = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+    const name       = batchName || `${monthLabel} Payroll`;
+
+    // Use maybeSingle() instead of single() — returns null instead of error when no row found
     const { data: existingBatch } = await supabase
       .from('payment_batches')
       .select('id, staff_count, total_amount')
@@ -289,7 +286,7 @@ async function createPaymentBatch(req, res, next) {
       .eq('status', 'pending')
       .order('created_at', { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
     let batch;
     if (existingBatch) {
@@ -409,7 +406,7 @@ async function approveBatch(req, res, next) {
     // 4. Update status to approved
     const { data: updated, error: updateError } = await supabase
       .from('payment_batches')
-      .update({ status: 'approved', approved_at: new Date().toISOString(), approved_by: userId })
+      .update({ status: 'approved', approved_by: userId })
       .eq('id', batchId)
       .select()
       .single();
@@ -455,9 +452,7 @@ async function getPaymentStatus(req, res, next) {
       .from('payment_batches')
       .select(`
         id, batch_name, status, staff_count, total_amount,
-        total_paid, total_amount_disbursed,
-        created_at, processed_at,
-        organization_id
+        created_at, organization_id
       `)
       .eq('id', batchId)
       .single();
