@@ -163,7 +163,15 @@ function recomputeTrustScore(livenessData, clientFaceMatchScore) {
   livenessScore = Math.min(100, livenessScore);
 
   const faceMatchScore = Math.max(0, Math.min(100, clientFaceMatchScore ?? 0));
-  const rawScore       = (livenessScore * LIVENESS_WEIGHT) + (faceMatchScore * FACE_MATCH_WEIGHT);
+
+  // If no face match score provided (0), use liveness score alone
+  // rather than penalizing the worker for a missing comparison
+  let rawScore;
+  if (faceMatchScore === 0) {
+    rawScore = livenessScore; // liveness-only
+  } else {
+    rawScore = (livenessScore * LIVENESS_WEIGHT) + (faceMatchScore * FACE_MATCH_WEIGHT);
+  }
   const serverTrustScore = Math.round(Math.min(100, rawScore) * 100) / 100;
 
   let serverVerdict;

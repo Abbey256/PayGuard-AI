@@ -88,9 +88,14 @@ type Stage =
 
 const synth = window.speechSynthesis;
 
-const speak = (text: string, onEnd?: () => void) => {
-  if (!synth) { if (onEnd) onEnd(); return; }
-  synth.cancel();
+// Speech queue — prevents cancel() from cutting off current speech
+let speechQueue: string[] = [];
+let isSpeaking = false;
+
+const processQueue = () => {
+  if (isSpeaking || speechQueue.length === 0) return;
+  const text = speechQueue.shift()!;
+  isSpeaking = true;
 
   const utterance = new SpeechSynthesisUtterance(text);
   const voices    = synth.getVoices();
@@ -103,11 +108,47 @@ const speak = (text: string, onEnd?: () => void) => {
   );
   if (femaleVoice) utterance.voice = femaleVoice;
   utterance.lang   = 'en-GB';
-  utterance.rate   = 0.85;
+  utterance.rate   = 0.9;
   utterance.pitch  = 1.1;
   utterance.volume = 1;
 
+  const done = () => {
+    isSpeaking = false;
+    processQueue();
+  };
+
+  utterance.onend   = done;
+  utterance.onerror = done;
+  // Fallback in case onend doesn't fire (common on Android)
+  setTimeout(done, text.length * 75 + 1200);
+
+  synth.speak(utterance);
+};
+
+const speak = (text: string, onEnd?: () => void) => {
+  if (!synth) { if (onEnd) onEnd(); return; }
+
   if (onEnd) {
+    // Wrap with callback — speak inline, not queued
+    synth.cancel();
+    speechQueue = [];
+    isSpeaking = false;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices    = synth.getVoices();
+    const femaleVoice = voices.find(v =>
+      v.name.includes('Female') ||
+      v.name.includes('Samantha') ||
+      v.name.includes('Google UK English Female') ||
+      v.name.includes('Microsoft Zira') ||
+      v.name.includes('Karen'),
+    );
+    if (femaleVoice) utterance.voice = femaleVoice;
+    utterance.lang   = 'en-GB';
+    utterance.rate   = 0.9;
+    utterance.pitch  = 1.1;
+    utterance.volume = 1;
+
     let fired = false;
     const fallbackTime = text.length * 80 + 1500;
     const fallbackTimer = setTimeout(() => {
@@ -120,9 +161,13 @@ const speak = (text: string, onEnd?: () => void) => {
     utterance.onerror = () => {
       if (!fired) { fired = true; clearTimeout(fallbackTimer); onEnd(); }
     };
-  }
 
-  synth.speak(utterance);
+    synth.speak(utterance);
+  } else {
+    // No callback — queue it so it doesn't interrupt challenge speech
+    speechQueue.push(text);
+    processQueue();
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
