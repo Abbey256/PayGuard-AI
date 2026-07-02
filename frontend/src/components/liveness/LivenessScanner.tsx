@@ -11,6 +11,7 @@ import {
   BlinkState,
   HeadTurnState,
   SmileState,
+  ChallengeType,
 } from './challengeEngine';
 import { computeTrustScore } from './trustScore';
 import {
@@ -20,6 +21,44 @@ import {
   LandmarkVector,
   SIMILARITY_THRESHOLDS,
 } from './faceVerification';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crypto-seeded challenge shuffle — unpredictable per-session order
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generates a cryptographically random challenge sequence.
+ * Uses crypto.getRandomValues so the order cannot be predicted or replayed.
+ * Each session gets a unique ordering of all 3 challenges.
+ */
+function generateChallengeSequence(): ChallengeType[] {
+  const challenges: ChallengeType[] = ['blink', 'headTurn', 'smile'];
+  const buf = new Uint32Array(challenges.length);
+  crypto.getRandomValues(buf);
+  // Attach random weights and sort — produces an unpredictable permutation
+  return challenges
+    .map((c, i) => ({ c, r: buf[i] }))
+    .sort((a, b) => a.r - b.r)
+    .map(({ c }) => c);
+}
+
+const CHALLENGE_PROMPTS: Record<ChallengeType, { text: string; speech: string; progress?: (s: BlinkState | HeadTurnState | SmileState) => string }> = {
+  blink: {
+    text: 'Blink twice',
+    speech: 'Please blink twice naturally.',
+    progress: (s) => `Blinks: ${(s as BlinkState).blinkCount}/2`,
+  },
+  headTurn: {
+    text: 'Turn head left, then right',
+    speech: 'Now turn your head left, then right.',
+    progress: (s) => (s as HeadTurnState).leftDetected ? 'Now turn right ➜' : '← Turn head left',
+  },
+  smile: {
+    text: 'Smile for the camera',
+    speech: 'Now smile for the camera.',
+    progress: (s) => (s as SmileState).smileStartMs ? 'Hold your smile…' : 'Show your smile 😊',
+  },
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -184,6 +223,10 @@ export function LivenessScanner({
   const detectionActiveRef = useRef(false);
   const challengesPassed   = useRef(0);
   const positioningStartMs = useRef<number | null>(null);
+
+  // Crypto-randomised challenge sequence — generated once per session
+  const challengeSequence = useRef<ChallengeType[]>(generateChallengeSequence());
+  const challengeIndexRef = useRef(0); // which challenge we're on
 
   // Reference embedding (from the ID/NIN photo) — built once on mount
   const referenceEmbedRef = useRef<LandmarkVector | null>(null);
@@ -456,6 +499,8 @@ export function LivenessScanner({
 
         // Transition out of 'initializing' on first detection
         if (currentStage === 'initializing' || currentStage === 'hardware_check') {
+          const firstChallenge = challengeSequence.current[0];
+          const prompt = CHALLENGE_PROMPTS[firstChallenge];
           advanceStage('positioning', 'Position your face in the oval', 'Welcome. Position your face in the oval.');
           return;
         }
@@ -467,46 +512,51 @@ export function LivenessScanner({
         if (currentStage === 'positioning') {
           if (!positioningStartMs.current) positioningStartMs.current = now;
           if (now - positioningStartMs.current > 2000) {
-            advanceStage('blink', 'Blink twice', 'Please blink twice naturally.');
+            const firstChallenge = challengeSequence.current[0];
+            const prompt = CHALLENGE_PROMPTS[firstChallenge];
+            advanceStage(firstChallenge as Stage, prompt.text, prompt.speech);
           }
         }
 
-        // Stage: blink — detect 2 blinks
-        if (currentStage === 'blink') {
+        // ── Dynamic challenge dispatch ──────────────────────────────────────
+        const currentChallenge = challengeSequence.current[challengeIndexRef.current] as ChallengeType | undefined;
+
+        const advanceToNextChallenge = () => {
+          challengesPassed.current += 1;
+          challengeIndexRef.current += 1;
+          const next = challengeSequence.current[challengeIndexRef.current];
+          if (next) {
+            const prompt = CHALLENGE_PROMPTS[next];
+            advanceStage(next as Stage, prompt.text, `Good. ${prompt.speech}`);
+          } else {
+            finishVerification(challengesPassed.current);
+          }
+        };
+
+        // Stage: blink
+        if (currentStage === 'blink' && currentChallenge === 'blink') {
           const ear =
             (computeEAR(landmarks, { top: 159, bottom: 145, left: 33, right: 133 }) +
              computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 })) / 2;
           blinkState.current = processBlink(blinkState.current, ear);
           setFeedback(`Blinks: ${blinkState.current.blinkCount}/2`);
-
-          if (blinkState.current.blinkCount >= 2) {
-            challengesPassed.current += 1;
-            advanceStage('headTurn', 'Turn head left, then right', 'Good. Now turn your head left, then right.');
-          }
+          if (blinkState.current.blinkCount >= 2) advanceToNextChallenge();
         }
 
         // Stage: headTurn
-        if (currentStage === 'headTurn') {
+        if (currentStage === 'headTurn' && currentChallenge === 'headTurn') {
           const ratio = computeHeadRatio(landmarks);
           headTurnState.current = processHeadTurn(headTurnState.current, ratio);
-          setFeedback(headTurnState.current.leftDetected ? 'Now turn right' : 'Turn head left');
-
-          if (headTurnState.current.passed) {
-            challengesPassed.current += 1;
-            advanceStage('smile', 'Smile for the camera', 'Perfect. Now smile for the camera.');
-          }
+          setFeedback(headTurnState.current.leftDetected ? 'Now turn right ➜' : '← Turn head left');
+          if (headTurnState.current.passed) advanceToNextChallenge();
         }
 
         // Stage: smile
-        if (currentStage === 'smile') {
+        if (currentStage === 'smile' && currentChallenge === 'smile') {
           const mouthRatio = computeMouthRatio(landmarks);
           smileState.current = processSmile(smileState.current, mouthRatio, deltaMs);
-          setFeedback(smileState.current.smileStartMs ? 'Hold smile...' : 'Smile for the camera');
-
-          if (smileState.current.passed) {
-            challengesPassed.current += 1;
-            finishVerification(challengesPassed.current);
-          }
+          setFeedback(smileState.current.smileStartMs ? 'Hold your smile…' : 'Show your smile 😊');
+          if (smileState.current.passed) advanceToNextChallenge();
         }
       });
 

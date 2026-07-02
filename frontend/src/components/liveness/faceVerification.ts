@@ -225,18 +225,16 @@ export async function verifyHardwareCamera(stream: MediaStream): Promise<DeviceL
 
   // ── Layer 1: getCapabilities() ───────────────────────────────────────────
   // Physical cameras implement facingMode; many virtual drivers do not.
+  // NOTE: Mobile browsers (Android Chrome, iOS Safari) often do NOT report
+  // facingMode in getCapabilities() even for real hardware cameras, so we
+  // only use this as a positive signal, never as a blocking condition.
   if (typeof videoTrack.getCapabilities === 'function') {
     const caps = videoTrack.getCapabilities();
     if (caps.facingMode && caps.facingMode.length > 0) {
-      // Physical device confirmed via hardware capability
-      // Still run label check as secondary guard
-    } else if (!caps.facingMode || caps.facingMode.length === 0) {
-      // Missing facingMode is a strong signal for a virtual camera
-      return {
-        isHardware: false,
-        reason: 'Camera does not report hardware facing-mode capability. Virtual camera suspected.',
-      };
+      // Physical device positively confirmed via hardware capability — skip
+      // further checks (still run label check as secondary guard below)
     }
+    // Missing facingMode is NOT treated as a block — mobile browsers omit it
   }
 
   // ── Layer 2: Label heuristic ─────────────────────────────────────────────
