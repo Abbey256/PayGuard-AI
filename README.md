@@ -1,303 +1,412 @@
-# PayGuard AI
+<div align="center">
 
-**Biometric payroll verification for Nigerian government agencies.**  
-PayGuard AI prevents ghost worker fraud by requiring every staff member to complete a live biometric challenge before their salary is released. No liveness check, no payment.
+# 🛡️ PayGuard AI
 
-Live demo: [payguard-ai-twhx.onrender.com](https://payguard-ai-twhx.onrender.com)
+### *Ghost workers don't blink. Real ones do.*
+
+**Biometric payroll verification for Nigerian government agencies**  
+Stop ghost worker fraud before a single naira leaves the wallet.
+
+[![Live Demo](https://img.shields.io/badge/🌐_Live_Demo-payguard--ai--twhx.onrender.com-22c55e?style=for-the-badge)](https://payguard-ai-twhx.onrender.com)
+[![Node.js](https://img.shields.io/badge/Node.js-24.x-339933?style=for-the-badge&logo=node.js)](https://nodejs.org)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react)](https://react.dev)
+[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=for-the-badge&logo=supabase)](https://supabase.com)
+[![Squad](https://img.shields.io/badge/Squad-Payment_API-FF6B35?style=for-the-badge)](https://squadco.com)
+
+</div>
 
 ---
 
-## The Problem
+## 💀 The Problem
 
-Ghost workers — deceased, retired, or fictitious employees — cost the Nigerian government an estimated ₦200 billion annually. Traditional payroll audits rely on paper documentation that is easily forged. PayGuard AI makes ghost worker fraud structurally impossible: salary payments only execute after a verified live human face is confirmed in real time.
+Ghost workers — deceased, retired, or entirely fictitious employees — drain an estimated **₦200 billion** from the Nigerian government every year. Traditional payroll audits rely on paper documentation that can be forged in an afternoon. HR sign-offs get rubber-stamped. The money disappears.
+
+PayGuard AI makes this structurally impossible:
+
+> **No face. No blink. No salary.**
 
 ---
 
-## How It Works
+## ✨ What It Does
 
 ```
-HR Admin                    Worker (Mobile Browser)           Backend
-──────────                  ───────────────────────           ───────
-1. Upload staff + photo  →
-2. Send verification link ─────────────────────────────────→
-                            3. Open link on phone
-                            4. Camera opens
-                            5. Complete challenges:           Server issues signed
-                               • Smile                        nonce with challenge
-                               • Blink twice                  sequence — browser
-                               • Turn head left/right         cannot predict or
-                               (randomised order)             forge it
-                            6. Face compared against
-                               HR-uploaded photo
-                            7. Submit result + nonce ────────→
-                                                              8. Verify nonce HMAC
-                                                              9. Recompute score
-                                                              10. Write verdict to DB
-                                                              11. Auto-add to batch
-HR Admin
-3. Payments page loads batch of verified staff
-4. Review → Approve → Confirm payment
-5. Squad API disburses salary per staff member
-6. Name mismatch check blocks identity swaps
+📋 HR uploads staff + photo
+📧 Sends one-time verification link to worker's phone
+📱 Worker opens link → camera starts
+👁️ Worker completes 3 randomised biometric challenges
+🔐 Server verifies the session cryptographically
+✅ Worker marked verified → auto-added to salary batch
+💰 HR approves → Squad API disburses salaries
+🚫 Name mismatch? Payment blocked. Fraud logged.
+```
+
+Every step is locked. Every decision is audited.
+
+---
+
+## 🎯 Features
+
+<table>
+<tr>
+<td width="50%">
+
+### 🔒 Anti-Fraud
+- HMAC-SHA256 signed challenge nonces
+- Server-side score recomputation (client score ignored)
+- Cryptographically randomised challenge order
+- Replay attack prevention (single-use nonces)
+- Hardware camera lock (blocks OBS, DroidCam, etc.)
+- Bank account name verification before every transfer
+
+</td>
+<td width="50%">
+
+### 🧠 Biometrics
+- MediaPipe FaceMesh — 468 3D facial landmarks
+- Adaptive EAR calibration per person per session
+- Blink detection with hysteresis
+- Head turn ratio (left → right sequence)
+- Smile hold detection (1000ms sustained)
+- Cosine similarity face matching (pose-normalised)
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 💳 Payments
+- Squad API virtual accounts per ministry
+- Batch salary disbursement with HR approval gate
+- Jaro-Winkler fuzzy name matching
+- Identity swap prevention before every transfer
+- Full audit trail per transaction
+
+</td>
+<td>
+
+### 📊 Dashboard
+- Real-time staff verification status
+- Payment batch management
+- Ghost worker flagging
+- Wallet balance + transaction history
+- CSV payroll bulk upload
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🏗️ Architecture
+
+### Current Deployment
+
+```
+                    ┌─────────────────────────────┐
+                    │      Render (Single Service)  │
+                    │                               │
+   Browser ────────▶│  Express.js (Node 24)         │
+                    │    ├── Serves React SPA        │
+                    │    ├── REST API (/api/*)        │
+                    │    └── Static files (dist/)    │
+                    └──────────────┬────────────────┘
+                                   │
+              ┌────────────────────┼────────────────────┐
+              │                    │                    │
+       ┌──────▼──────┐    ┌────────▼──────┐   ┌────────▼──────┐
+       │  Supabase   │    │   Squad API   │   │  Resend API   │
+       │ PostgreSQL  │    │  Payments +   │   │   (Email)     │
+       │   + Auth    │    │  Virtual Accs │   └───────────────┘
+       │   + RLS     │    └───────────────┘
+       └─────────────┘
+```
+
+### Planned AWS Production Architecture
+
+> Serverless Lambda + API Gateway, Multi-AZ, with AWS Rekognition for server-side face verification
+
+```
+Route53 → CloudFront → WAF → API Gateway → Lambda Functions
+                                               ├── VerifyLambda  → RDS + ElastiCache
+                                               ├── PaymentLambda → Squad API
+                                               └── AuditLambda   → SQS → CloudWatch
+
+S3 (staff photos) → Rekognition (face compare)
+Secrets Manager (keys) | KMS (BVN/account encryption) | CloudTrail (audit)
 ```
 
 ---
 
-## Security Architecture
+## 🔐 The Nonce System (Anti-Bypass)
 
-### Anti-Fraud Layers
+This is the core security innovation. Without it, a fraudster could just POST:
+```json
+{ "blinkDetected": true, "headTurnDetected": true, "smileDetected": true, "faceMatchScore": 100 }
+```
+...and get verified without ever showing their face.
 
-| Layer | What it prevents |
-|-------|-----------------|
-| **HMAC-signed challenge nonce** | API bypass — cannot POST fake biometric data without a valid server-issued nonce |
-| **Server-side score recomputation** | Score tampering — backend ignores client-supplied trust score, always recomputes |
-| **Replay protection** | Nonce reuse — each nonce is single-use, expires in 10 minutes, bound to specific token |
-| **Randomised challenge sequence** | Pre-recorded video attacks — `crypto.getRandomValues` picks order each session |
-| **Adaptive EAR calibration** | False blink detection — baseline measured per person during positioning phase |
-| **Hardware camera lock** | Virtual camera injection — label heuristic + device list cross-check |
-| **Bank account name verification** | Identity swap — Squad API verifies account name matches staff name before transfer |
-| **One-time verification token** | Link reuse — token marked completed after first successful verification |
-
-### Trust Score Formula (Server-Side)
+Here's how we close that door:
 
 ```
-Liveness Score = 10 (base)
-               + challengesPassed × 25   (max 75)
-               + 15 (if no static face detected)
-               = max 100
+1. GET /api/verify/:token
+   Server generates:
+   payload = { seq: ["smile","blink","headTurn"], ts: Date.now(), rnd: <16 random bytes>, tok: token }
+   nonce   = base64url(payload) + "." + HMAC-SHA256(payload, NONCE_SECRET)
+   ↓
+   Returned to browser (browser CANNOT forge this — they don't have NONCE_SECRET)
 
-If faceMatchScore > 0:
-  Final = (Liveness × 0.5) + (FaceMatch × 0.5)
-Else:
-  Final = Liveness  ← face match unavailable, liveness-only
+2. Browser runs challenges in the SERVER-DICTATED order
 
-Verdict:  ≥ 90 → verified  |  70–89 → review  |  < 70 → flagged
+3. POST /api/verify/submit  { ..., challengeNonce: "<the nonce>" }
+   Server checks:
+   ✓ HMAC signature valid (timing-safe comparison)
+   ✓ Payload not expired (10 min TTL)
+   ✓ Token binding matches
+   ✓ Nonce not already used (replay prevention)
+   ✗ Any check fails → 403 + fraud logged
 ```
 
 ---
 
-## Tech Stack
+## 🧪 Verification Flow (End to End)
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | React 19, TypeScript, Vite, TailwindCSS |
-| Backend | Node.js, Express 5, ES Modules |
-| Database | Supabase (PostgreSQL + Row Level Security) |
-| Auth | Supabase Auth (JWT) |
-| Biometrics | MediaPipe FaceMesh (468 landmarks, in-browser) |
-| Face comparison | Cosine similarity on pose-normalised landmark embeddings |
-| Email | Resend API |
-| Payments | Squad API (virtual accounts + bank transfers) |
-| Deployment | Render (single service — Express serves built React app) |
+```
+HR Admin (Dashboard)                    Worker (Mobile)              Backend
+────────────────────                    ───────────────              ───────
 
-### Production Target Architecture
-The diagram shows the planned AWS serverless architecture (Lambda + API Gateway, Multi-AZ) with Rekognition for server-side face verification. Current deployment runs on Render with browser-side face matching.
+Upload staff photo ──────────────────────────────────────────────▶ Stored in Supabase Storage
+Send verification link ──────────────────────────────────────────▶ Token created, email sent
+                              ◀── Opens /verify/:token ──────────── Token validated
+                                                                     Signed nonce issued
+                                                                     Challenge order set
+
+                              Camera starts ───────────────────────
+                              Positioning (2s EAR calibration) ───
+                              Challenge 1: e.g. Smile 😊 ─────────
+                              Challenge 2: e.g. Blink 👁️ ─────────
+                              Challenge 3: e.g. Head turn ↔️ ──────
+                              Face match vs HR photo ─────────────
+                              Submit + nonce ─────────────────────▶ Nonce verified
+                                                                     Score recomputed
+                                                                     Staff → verified
+                                                                     Added to batch ──▶ payment_batches
+
+Review batch ◀──────────────────────────────────────────────────── Real-time update
+Approve batch ───────────────────────────────────────────────────▶ status: approved
+Confirm payment (type APPROVE) ──────────────────────────────────▶ Squad name lookup
+                                                                     Jaro-Winkler match
+                                                                     Squad transfer ────▶ Worker's bank
+```
 
 ---
 
-## Project Structure
+## 📐 Trust Score Formula
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   SERVER-SIDE ONLY                   │
+│                                                      │
+│  Liveness Score                                      │
+│    = 10 (base)                                       │
+│    + challengesPassed × 25   (max 75 for 3/3)       │
+│    + 15 (no static face detected)                    │
+│    = max 100                                         │
+│                                                      │
+│  If faceMatchScore > 0:                              │
+│    Final = (Liveness × 0.5) + (FaceMatch × 0.5)     │
+│  Else (face match unavailable):                      │
+│    Final = Liveness                                  │
+│                                                      │
+│  ≥ 90 → ✅ verified   (salary released)              │
+│  70–89 → ⏸️  review    (HR notified)                 │
+│  < 70  → 🚫 flagged   (payment blocked)              │
+└─────────────────────────────────────────────────────┘
+
+Client-supplied trustScore and verdict are ALWAYS ignored.
+```
+
+---
+
+## 🗂️ Project Structure
 
 ```
 PayGuard-AI/
-├── frontend/                   # React + TypeScript SPA
+│
+├── 📱 frontend/                    React 19 + TypeScript + Vite + TailwindCSS
 │   └── src/
 │       ├── pages/
-│       │   ├── Dashboard/      # HR admin home with stats
+│       │   ├── Dashboard/Home.tsx        # Stats, verified count, savings estimate
 │       │   ├── PayGuard/
-│       │   │   ├── Staff.tsx   # Staff management + photo upload
-│       │   │   ├── Payments.tsx # Batch payment flow
-│       │   │   ├── Verification.tsx # Verification request management
-│       │   │   └── Reports.tsx
+│       │   │   ├── Staff.tsx             # Staff CRUD + photo upload + verification send
+│       │   │   ├── Payments.tsx          # Batch review → approve → process
+│       │   │   ├── Verification.tsx      # Verification request tracking
+│       │   │   └── Reports.tsx           # Analytics + flagged staff
 │       │   └── Verification/
-│       │       └── VerificationPage.tsx  # Worker-facing verification page
-│       └── components/
-│           └── liveness/
-│               ├── LivenessScanner.tsx   # Main scanner component
-│               ├── challengeEngine.ts    # Pure blink/headTurn/smile functions
-│               ├── faceVerification.ts   # Cosine similarity face matching
-│               ├── trustScore.ts         # Score computation
-│               └── FaceGuide.tsx         # Oval face guide UI
-├── backend/                    # Express API
+│       │       └── VerificationPage.tsx  # Public worker-facing verification page
+│       └── components/liveness/
+│           ├── LivenessScanner.tsx       # Orchestrates the full biometric flow
+│           ├── challengeEngine.ts        # Pure functions: EAR, head ratio, MAR
+│           ├── faceVerification.ts       # Cosine similarity + hardware camera lock
+│           ├── trustScore.ts             # Score formula + verdict
+│           └── FaceGuide.tsx             # Animated oval face guide
+│
+├── ⚙️  backend/                     Node.js + Express 5 + ES Modules
 │   └── src/
 │       ├── controllers/
-│       │   ├── verifyController.js    # Liveness token + HMAC nonce system
-│       │   ├── paymentController.js   # Batch creation, approval, disbursement
-│       │   ├── organizationController.js
-│       │   └── employeeController.js
+│       │   ├── verifyController.js       # HMAC nonce system + score recomputation
+│       │   ├── paymentController.js      # Idempotent batch create + Squad disburse
+│       │   ├── organizationController.js # Org setup + Squad sub-account
+│       │   └── employeeController.js     # Staff + CSV upload
 │       ├── services/
-│       │   ├── squadService.js        # Squad API integration
-│       │   └── supabaseClient.js
+│       │   ├── squadService.js           # Squad: virtual accounts, transfers, lookup
+│       │   ├── supabaseClient.js         # Service role client (bypasses RLS)
+│       │   └── faceMatchService.js       # Placeholder → AWS Rekognition (roadmap)
 │       ├── middleware/
-│       │   ├── authMiddleware.js
-│       │   └── rateLimiter.js
-│       └── models/schema.sql          # Full PostgreSQL schema + RLS policies
-└── ai/                         # Standalone algorithm modules (documented)
-    ├── liveness/livenessDetector.js
-    ├── facematch/faceMatch.js
-    └── trustScore/trustScore.js
+│       │   ├── authMiddleware.js         # Supabase JWT validation
+│       │   └── rateLimiter.js            # 100 req/15min general, 10/15min verify
+│       └── models/schema.sql             # PostgreSQL schema + RLS policies
+│
+└── 🤖 ai/                           Standalone algorithm modules
+    ├── liveness/livenessDetector.js  # EAR, head ratio, MAR implementations
+    ├── facematch/faceMatch.js        # Cosine similarity face matching
+    └── trustScore/trustScore.js      # Score combinator + verdict engine
 ```
 
 ---
 
-## Verification Flow (Technical Detail)
+## 🚀 Getting Started
 
-### 1. HR sends verification link
-```
-POST /api/verification/send
-→ Generates UUID token, stores in verification_requests
-→ Emails worker a link: /verify/:token
-```
+### Prerequisites
+- Node.js 20+
+- Supabase project
+- Squad account (sandbox keys for dev)
+- Resend account (email)
 
-### 2. Worker opens link — server issues signed challenge
-```
-GET /api/verify/:token
-→ Validates token (not expired, not completed)
-→ Issues HMAC-SHA256 signed nonce:
-   payload = { seq: ["smile","blink","headTurn"], ts, rnd, tok }
-   nonce   = base64url(payload) + "." + HMAC(payload, NONCE_SECRET)
-→ Returns: { workerName, photoUrl, challengeNonce, challengeSequence }
-```
+### Local Development
 
-### 3. Browser runs challenges in server-dictated order
-- EAR baseline calibrated during 2s positioning phase
-- Blink: adaptive threshold = 70% of baseline EAR (handles all eye shapes)
-- Head turn: ratio < 0.35 = left, > 0.65 = right
-- Smile: mouth width/height ratio > 3.3 held for 1000ms
-- Face compared against HR photo using cosine similarity on 468 landmarks
+```bash
+# Clone
+git clone https://github.com/Abbey256/PayGuard-AI.git
+cd PayGuard-AI
 
-### 4. Submit with nonce
-```
-POST /api/verify/submit
-Body: { token, challengeNonce, faceMatchScore, livenessData }
-→ Server verifies HMAC signature
-→ Checks nonce not expired (10 min TTL)
-→ Checks nonce not replayed (in-memory store)
-→ Checks nonce bound to this token
-→ Recomputes trust score server-side
-→ Marks token completed
-→ Updates staff status
-→ Auto-adds to payment batch
+# Install everything
+npm run install-all
+
+# Set up environment variables
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+# Fill in your keys
+
+# Run both frontend (port 5173) + backend (port 5000)
+npm run dev
 ```
 
----
+### Environment Variables
 
-## Payment Flow
-
-```
-Payment Batch (draft)
-  ↓ created automatically when staff verified
-Approve Batch (pending → approved)
-  ↓ HR clicks Approve
-Process Payment
-  ↓ HR types "APPROVE" to confirm
-  ↓ For each verified staff:
-      1. Squad account name lookup
-      2. Fuzzy name match (Jaro-Winkler)
-      3. If match → Squad payout transfer
-      4. If mismatch → blocked, audit logged
-```
-
----
-
-## Environment Variables
-
-### Backend (`backend/.env`)
-
+**`backend/.env`**
 ```env
 PORT=5000
 NODE_ENV=development
-FRONTEND_URL=https://your-domain.onrender.com
+FRONTEND_URL=http://localhost:5173
 
-# Supabase
 SUPABASE_URL=https://xxx.supabase.co
 SUPABASE_SERVICE_KEY=eyJ...
 
-# Squad Payment API
 SQUAD_SECRET_KEY=sandbox_sk_...
 SQUAD_PUBLIC_KEY=sandbox_pk_...
 
-# Email
 RESEND_API_KEY=re_...
 RESEND_FROM_EMAIL=PayGuard AI <support@yourdomain.com>
 
-# Anti-fraud nonce signing (generate with: node -e "require('crypto').randomBytes(32).toString('hex')")
+# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 NONCE_SECRET=your-32-byte-hex-secret
 ```
 
-### Frontend (`frontend/.env`)
-
+**`frontend/.env`**
 ```env
-VITE_API_URL=https://your-backend.onrender.com
 VITE_SUPABASE_URL=https://xxx.supabase.co
 VITE_SUPABASE_ANON_KEY=eyJ...
 ```
 
+### Deploy to Render
+
+| Setting | Value |
+|---------|-------|
+| Build Command | `npm run build` |
+| Start Command | `npm run start` |
+| Root Directory | *(repo root)* |
+
+Add all backend env vars to Render's environment settings. The build installs both frontend and backend deps, runs Vite, and outputs the React app to `backend/public` where Express serves it.
+
 ---
 
-## Local Development
+## 🗃️ Database Schema
 
-```bash
-# Install all dependencies
-npm run install-all
-
-# Run both frontend and backend concurrently
-npm run dev
-
-# Backend only (port 5000)
-npm run backend
-
-# Frontend only (port 5173)
-npm run frontend
+```sql
+organizations          -- Ministry/agency accounts + Squad wallet balance
+staff                  -- Employee records (status: pending/verified/flagged)
+verification_requests  -- One-time tokens (status: pending/completed)
+payment_batches        -- Grouped salary disbursements (status: draft/approved/processed)
+payment_batch_staff    -- Staff ↔ batch junction table
+payment_records        -- Per-transfer audit trail (success/failed)
+audit_logs             -- Security events: fraud attempts, approvals, payouts
 ```
 
-## Deployment (Render — single service)
-
-```
-Build Command:  npm run build
-Start Command:  npm run start
-```
-
-The build script installs backend + frontend deps and runs `vite build` which outputs to `backend/public`. Express serves the built React app as static files with React Router fallback.
+All tables have **Row Level Security (RLS)** — admins only access their own organisation's data. The `anon` role can read a single `verification_request` by token only (for the public `/verify/:token` page).
 
 ---
 
-## Database Schema
+## 🗺️ Roadmap
 
-Key tables in Supabase PostgreSQL:
-
-| Table | Purpose |
-|-------|---------|
-| `organizations` | Ministry/agency accounts |
-| `staff` | Employee records with status + trust_score |
-| `verification_requests` | One-time verification tokens |
-| `payment_batches` | Grouped salary disbursements |
-| `payment_batch_staff` | Staff ↔ batch junction |
-| `payment_records` | Per-transfer audit trail |
-| `audit_logs` | Security events (fraud attempts, approvals, payments) |
-
-All tables have Row Level Security (RLS) — admins can only access their own organisation's data. The `anon` role can read verification_requests by token only (for the public /verify/:token page).
-
----
-
-## Roadmap — Production Hardening
-
-- [ ] **AWS Rekognition** — Server-side face verification (S3 bucket created, IAM configured)
-- [ ] **NIN/BVN verification** — NIMC/NIBSS API integration for government ID matching
-- [ ] **Redis** — Replace in-memory nonce store for multi-instance deployments
-- [ ] **BVN/bank account encryption** — pgcrypto or Supabase Vault (NDPR compliance)
-- [ ] **Squad live keys** — Switch from sandbox to production Squad environment
-- [ ] **AWS Lambda** — Migrate to serverless architecture (architecture diagram included)
+| Feature | Status |
+|---------|--------|
+| Core biometric verification flow | ✅ Done |
+| HMAC anti-bypass nonce system | ✅ Done |
+| Squad payment disbursement | ✅ Done |
+| Adaptive EAR calibration (per-person blink) | ✅ Done |
+| Randomised challenge order (crypto.getRandomValues) | ✅ Done |
+| AWS Rekognition server-side face verification | 🔧 S3 bucket ready, wiring pending |
+| NIN / BVN verification (NIMC/NIBSS API) | 📋 Planned for production |
+| BVN/bank account encryption (pgcrypto / Supabase Vault) | 📋 NDPR compliance |
+| Redis nonce store (multi-instance support) | 📋 Planned |
+| Switch to Squad live keys | 📋 On approval |
+| Full AWS serverless migration (Lambda + API Gateway) | 🗺️ Architecture designed |
 
 ---
 
-## Security Notes
+## 🔏 Privacy
 
-- All biometric processing runs in the browser — no video or images are sent to the server
-- Only numeric scores and challenge metadata are transmitted
-- The HMAC nonce system ensures verification sessions cannot be fabricated via API
-- Trust scores are always recomputed server-side — client values are ignored
-- Fraud attempts (invalid nonces) are logged to audit_logs with IP address
+- No video frames leave the device — ever
+- No raw biometric images stored on any server
+- Only numeric scores and challenge metadata transmitted
+- Biometric processing is entirely ephemeral — session memory only
+- Audit logs contain metadata only, not biometric data
 
 ---
 
-Built for the **2025 Hackathon** — solving ghost worker fraud in Nigerian government payroll.
+## 🧰 Tech Stack
+
+| | |
+|--|--|
+| **Frontend** | React 19, TypeScript, Vite 6, TailwindCSS 4 |
+| **Backend** | Node.js 24, Express 5, ES Modules |
+| **Database** | Supabase (PostgreSQL 15 + RLS + Realtime) |
+| **Auth** | Supabase Auth (JWT) |
+| **Biometrics** | MediaPipe FaceMesh (WASM, in-browser, 468 landmarks) |
+| **Face Match** | Cosine similarity on pose-normalised landmark embeddings |
+| **Payments** | Squad API (Nigeria) — virtual accounts + bank transfers |
+| **Email** | Resend API |
+| **Deployment** | Render — single web service |
+| **Target Infra** | AWS (Lambda, RDS, Rekognition, S3, KMS, CloudTrail) |
+
+---
+
+<div align="center">
+
+**Built with 🔥 for the 2026 Hackathon**
+
+*Solving ghost worker fraud in Nigerian government payroll — one blink at a time.*
+
+[![GitHub](https://img.shields.io/badge/GitHub-Abbey256%2FPayGuard--AI-181717?style=flat-square&logo=github)](https://github.com/Abbey256/PayGuard-AI)
+
+</div>
