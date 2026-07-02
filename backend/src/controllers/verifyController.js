@@ -205,7 +205,7 @@ export async function validateToken(req, res, next) {
 
     const { data: verReq, error: verReqError } = await supabase
       .from("verification_requests")
-      .select("id, status, token_expires_at, staff_id")
+      .select("id, status, token_expires_at, staff_id, final_verdict")
       .eq("token", token)
       .single();
 
@@ -214,7 +214,12 @@ export async function validateToken(req, res, next) {
     }
 
     if (verReq.status === "completed") {
-      return res.status(409).json({ message: "Verification already completed" });
+      // If previously verified — block completely
+      if (verReq.final_verdict === "verified") {
+        return res.status(409).json({ message: "Verification already completed successfully" });
+      }
+      // If flagged/review — allow retry by re-issuing a fresh nonce
+      console.log(`[PayGuard] Re-issuing challenge for previously flagged token ${token.slice(0, 8)}…`);
     }
 
     if (new Date(verReq.token_expires_at) < new Date()) {
@@ -316,6 +321,7 @@ export async function submitVerification(req, res, next) {
         id,
         staff_id,
         status,
+        final_verdict,
         staff (
           first_name,
           last_name,
@@ -328,8 +334,19 @@ export async function submitVerification(req, res, next) {
       .eq("token", token)
       .single();
 
-    if (fetchError || !verificationRequest || verificationRequest.status === "completed") {
-      return res.status(409).json({ message: "Token already used or not found" });
+    if (fetchError || !verificationRequest) {
+      return res.status(409).json({ message: "Token not found" });
+    }
+
+    // If already completed with verified verdict — block replay
+    if (verificationRequest.status === "completed" && verificationRequest.final_verdict === "verified") {
+      return res.status(409).json({ message: "Verification already completed successfully" });
+    }
+
+    // If completed but flagged/review — allow one retry (re-verification)
+    // This handles the case where face match failed on first attempt
+    if (verificationRequest.status === "completed" && verificationRequest.final_verdict !== "verified") {
+      console.log(`[PayGuard] Allowing re-verification for flagged token ${token.slice(0, 8)}…`);
     }
 
     if (!verificationRequest.staff.photo_url) {
