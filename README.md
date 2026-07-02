@@ -1,342 +1,303 @@
-# PayGuard AI 🛡️
+# PayGuard AI
 
-> **Verify Once. Pay with Confidence. The Proof-of-Life Layer for Government Payroll.**
+**Biometric payroll verification for Nigerian government agencies.**  
+PayGuard AI prevents ghost worker fraud by requiring every staff member to complete a live biometric challenge before their salary is released. No liveness check, no payment.
 
-[![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)]()
-[![Node](https://img.shields.io/badge/Node.js-18%2B-green?style=flat-square)](https://nodejs.org)
-[![React](https://img.shields.io/badge/React-19-blue?style=flat-square)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue?style=flat-square)](https://www.typescriptlang.org)
+Live demo: [payguard-ai-twhx.onrender.com](https://payguard-ai-twhx.onrender.com)
 
 ---
 
 ## The Problem
 
-Nigeria loses an estimated **₦15–20 billion monthly** to ghost workers — employees who have resigned, passed away, or never existed, yet continue drawing salaries from government payrolls.
-
-Existing verification systems authenticate identity at **enrolment**. Nobody checks again at **disbursement**.
-
-PayGuard AI closes this gap. Before any salary leaves a ministry wallet, the worker must pass a real-time AI-powered biometric challenge — in their browser, on any smartphone, with no app download required.
+Ghost workers — deceased, retired, or fictitious employees — cost the Nigerian government an estimated ₦200 billion annually. Traditional payroll audits rely on paper documentation that is easily forged. PayGuard AI makes ghost worker fraud structurally impossible: salary payments only execute after a verified live human face is confirmed in real time.
 
 ---
 
 ## How It Works
 
 ```
-HR Admin                     Worker (any phone/browser)
-────────                     ──────────────────────────
-1. Upload staff CSV          
-2. Assign reference photos   
-3. Trigger verification round
-                             4. Receive secure one-time email link
-                             5. Open link → biometric challenge starts
-                                 ├── Blink twice
-                                 ├── Turn head left → right
-                                 └── Smile and hold
-                             6. AI scores liveness + face match
-                             7. Result submitted to backend
-4. Dashboard shows results:
-   ├── Verified  → added to payment batch
-   ├── Review    → manual HR check
-   └── Flagged   → ghost alert, payment blocked
-5. Admin approves batch
-6. Payment API disburses salaries to verified accounts only
+HR Admin                    Worker (Mobile Browser)           Backend
+──────────                  ───────────────────────           ───────
+1. Upload staff + photo  →
+2. Send verification link ─────────────────────────────────→
+                            3. Open link on phone
+                            4. Camera opens
+                            5. Complete challenges:           Server issues signed
+                               • Smile                        nonce with challenge
+                               • Blink twice                  sequence — browser
+                               • Turn head left/right         cannot predict or
+                               (randomised order)             forge it
+                            6. Face compared against
+                               HR-uploaded photo
+                            7. Submit result + nonce ────────→
+                                                              8. Verify nonce HMAC
+                                                              9. Recompute score
+                                                              10. Write verdict to DB
+                                                              11. Auto-add to batch
+HR Admin
+3. Payments page loads batch of verified staff
+4. Review → Approve → Confirm payment
+5. Squad API disburses salary per staff member
+6. Name mismatch check blocks identity swaps
 ```
 
 ---
 
-## AI Engine
+## Security Architecture
 
-All AI processing runs **in the worker's browser**. No biometric video or images are transmitted to the server.
+### Anti-Fraud Layers
 
-### Liveness Detection (`ai/liveness/livenessDetector.js`)
+| Layer | What it prevents |
+|-------|-----------------|
+| **HMAC-signed challenge nonce** | API bypass — cannot POST fake biometric data without a valid server-issued nonce |
+| **Server-side score recomputation** | Score tampering — backend ignores client-supplied trust score, always recomputes |
+| **Replay protection** | Nonce reuse — each nonce is single-use, expires in 10 minutes, bound to specific token |
+| **Randomised challenge sequence** | Pre-recorded video attacks — `crypto.getRandomValues` picks order each session |
+| **Adaptive EAR calibration** | False blink detection — baseline measured per person during positioning phase |
+| **Hardware camera lock** | Virtual camera injection — label heuristic + device list cross-check |
+| **Bank account name verification** | Identity swap — Squad API verifies account name matches staff name before transfer |
+| **One-time verification token** | Link reuse — token marked completed after first successful verification |
 
-Uses **MediaPipe FaceMesh** (468 3D facial landmarks) to confirm the person is physically present.
-
-| Challenge | How it's detected |
-|-----------|-------------------|
-| Blink | Eye Aspect Ratio (EAR) threshold crossing — requires full open→close→open cycle |
-| Head turn | Nose-tip lateral ratio shift across cheek anchor points |
-| Smile | Mouth Aspect Ratio (MAR) sustained above threshold for ≥ 500 ms |
-
-Anti-spoofing:
-- Rejects static photos and screen replays (require genuine facial motion)
-- Hardware camera lock — detects and rejects OBS, DroidCam, and other virtual camera drivers using a three-layer check: `getCapabilities()` API, label heuristics, and device-list cross-reference
-
-### Face Matching (`ai/facematch/faceMatch.js`)
-
-Compares the live worker against their HR-uploaded reference photo.
-
-1. Extract a 468×3 pose-normalised, scale-invariant embedding from FaceMesh landmarks
-2. Compute cosine similarity between live and reference embeddings
-
-| Similarity | Verdict |
-|------------|---------|
-| ≥ 0.85 | Confirmed — proceed |
-| 0.80–0.85 | Uncertain — manual review |
-| < 0.80 | Mismatch — payment blocked, zero trust score |
-
-### Trust Score Calculator (`ai/trustScore/trustScore.js`)
-
-Combines liveness and face-match into a single score:
+### Trust Score Formula (Server-Side)
 
 ```
-Trust Score = (Liveness Score × 0.50) + (Face Match Score × 0.50)
+Liveness Score = 10 (base)
+               + challengesPassed × 25   (max 75)
+               + 15 (if no static face detected)
+               = max 100
+
+If faceMatchScore > 0:
+  Final = (Liveness × 0.5) + (FaceMatch × 0.5)
+Else:
+  Final = Liveness  ← face match unavailable, liveness-only
+
+Verdict:  ≥ 90 → verified  |  70–89 → review  |  < 70 → flagged
 ```
-
-| Score | Verdict | Action |
-|-------|---------|--------|
-| ≥ 90 | Verified | Salary disbursed automatically |
-| 70–89 | Review | Payment held, HR notified |
-| < 70 | Flagged | Payment blocked, ghost alert |
-
-If face-match verdict is `mismatch`, trust score is **zeroed** regardless of liveness result.
 
 ---
 
-## Architecture
+## Tech Stack
 
-### Current (Hackathon)
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 19, TypeScript, Vite, TailwindCSS |
+| Backend | Node.js, Express 5, ES Modules |
+| Database | Supabase (PostgreSQL + Row Level Security) |
+| Auth | Supabase Auth (JWT) |
+| Biometrics | MediaPipe FaceMesh (468 landmarks, in-browser) |
+| Face comparison | Cosine similarity on pose-normalised landmark embeddings |
+| Email | Resend API |
+| Payments | Squad API (virtual accounts + bank transfers) |
+| Deployment | Render (single service — Express serves built React app) |
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    Frontend (React/Vite)             │
-│  Admin Dashboard │ Staff Management │ Payments       │
-│  VerificationPage (public, token-gated)              │
-└────────────────────────┬────────────────────────────┘
-                         │ REST API
-┌────────────────────────▼────────────────────────────┐
-│               Backend (Node.js / Express)            │
-│  /api/verification  - send email links               │
-│  /api/verify        - token validation + submit      │
-│  /api/payments      - batch CRUD + process           │
-│  /api/organizations - setup + wallet                 │
-│  /api/employees     - CSV upload + payroll           │
-└────────────────────────┬────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────┐
-│                   Supabase                          │
-│  PostgreSQL DB │ Auth │ Storage (staff photos)       │
-└─────────────────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────┐
-│              Payment Provider (Sandbox)              │
-│  Account lookup │ Fund transfer │ Virtual accounts   │
-└─────────────────────────────────────────────────────┘
-```
-
-### Production (AWS Target Architecture)
-
-```
-                        ┌──────────────────────┐
-                        │   Route 53 (DNS)     │
-                        └──────────┬───────────┘
-                                   │
-                ┌──────────────────▼──────────────────┐
-                │        CloudFront CDN                │
-                │   (Static React frontend from S3)   │
-                └──────────────────┬──────────────────┘
-                                   │ HTTPS API calls
-                ┌──────────────────▼──────────────────┐
-                │          API Gateway                 │
-                │   (REST endpoints → Lambda)          │
-                └──────────────────┬──────────────────┘
-                                   │
-          ┌────────────────────────┼───────────────────┐
-          │                        │                   │
-┌─────────▼────────┐  ┌────────────▼─────┐  ┌─────────▼────────┐
-│  Lambda: Verify  │  │ Lambda: Payments │  │ Lambda: Staff    │
-│  (token + AI     │  │ (batch CRUD +    │  │ (CSV upload +    │
-│   result submit) │  │  disbursement)   │  │  photo mgmt)     │
-└─────────┬────────┘  └────────────┬─────┘  └─────────┬────────┘
-          │                        │                   │
-          └────────────────────────▼───────────────────┘
-                                   │
-                ┌──────────────────▼──────────────────┐
-                │         Amazon RDS                   │
-                │    PostgreSQL (db.t3.small)          │
-                │    Same schema as current Supabase   │
-                └─────────────────────────────────────┘
-          
-          Supporting services:
-          ├── S3              — Staff reference photos (private bucket, presigned URLs)
-          ├── SES             — Verification email delivery
-          ├── Cognito         — HR admin authentication
-          ├── Rekognition     — Optional: server-side face validation layer
-          ├── CloudWatch      — Logs and alerts
-          └── CloudTrail      — Immutable audit trail (compliance requirement)
-```
-
-**Estimated production cost:** $80–150/month at 5,000–20,000 staff.  
-**Migration timeline for cloud engineer:** 3–4 weeks full-time.
+### Production Target Architecture
+The diagram shows the planned AWS serverless architecture (Lambda + API Gateway, Multi-AZ) with Rekognition for server-side face verification. Current deployment runs on Render with browser-side face matching.
 
 ---
 
 ## Project Structure
 
 ```
-payguard-ai/
-├── ai/                          # AI modules (browser-side)
-│   ├── liveness/
-│   │   └── livenessDetector.js  # MediaPipe challenge engine
-│   ├── facematch/
-│   │   └── faceMatch.js         # Cosine similarity face matching
-│   └── trustScore/
-│       └── trustScore.js        # Score combinator + verdict engine
-│
-├── backend/                     # Node.js / Express API
-│   ├── server.js                # Entry point
+PayGuard-AI/
+├── frontend/                   # React + TypeScript SPA
+│   └── src/
+│       ├── pages/
+│       │   ├── Dashboard/      # HR admin home with stats
+│       │   ├── PayGuard/
+│       │   │   ├── Staff.tsx   # Staff management + photo upload
+│       │   │   ├── Payments.tsx # Batch payment flow
+│       │   │   ├── Verification.tsx # Verification request management
+│       │   │   └── Reports.tsx
+│       │   └── Verification/
+│       │       └── VerificationPage.tsx  # Worker-facing verification page
+│       └── components/
+│           └── liveness/
+│               ├── LivenessScanner.tsx   # Main scanner component
+│               ├── challengeEngine.ts    # Pure blink/headTurn/smile functions
+│               ├── faceVerification.ts   # Cosine similarity face matching
+│               ├── trustScore.ts         # Score computation
+│               └── FaceGuide.tsx         # Oval face guide UI
+├── backend/                    # Express API
 │   └── src/
 │       ├── controllers/
-│       │   ├── verifyController.js       # Token validation + liveness submit
-│       │   ├── paymentController.js      # Batch CRUD + disbursement
-│       │   └── organizationController.js # Setup + wallet
-│       ├── routes/
+│       │   ├── verifyController.js    # Liveness token + HMAC nonce system
+│       │   ├── paymentController.js   # Batch creation, approval, disbursement
+│       │   ├── organizationController.js
+│       │   └── employeeController.js
 │       ├── services/
+│       │   ├── squadService.js        # Squad API integration
 │       │   └── supabaseClient.js
 │       ├── middleware/
-│       │   ├── authMiddleware.js         # Supabase JWT verification
-│       │   ├── rateLimiter.js
-│       │   └── errorHandler.js
-│       └── utils/
-│           └── emailService.js
-│
-└── frontend/                    # React 19 / Vite / TypeScript
-    └── src/
-        ├── components/
-        │   └── liveness/
-        │       ├── LivenessScanner.tsx   # Full verification flow UI
-        │       ├── faceVerification.ts   # Live embedding + cosine similarity
-        │       ├── challengeEngine.ts    # EAR / head ratio / MAR
-        │       └── trustScore.ts        # Client-side score calculator
-        ├── pages/
-        │   ├── Dashboard/Home.tsx        # Stats + ghost alerts
-        │   ├── PayGuard/Staff.tsx        # Staff management + CSV upload
-        │   ├── PayGuard/Payments.tsx     # Batch approval + disbursement
-        │   └── Verification/VerificationPage.tsx  # Public worker-facing page
-        └── lib/
-            └── supabaseClient.ts
+│       │   ├── authMiddleware.js
+│       │   └── rateLimiter.js
+│       └── models/schema.sql          # Full PostgreSQL schema + RLS policies
+└── ai/                         # Standalone algorithm modules (documented)
+    ├── liveness/livenessDetector.js
+    ├── facematch/faceMatch.js
+    └── trustScore/trustScore.js
 ```
 
 ---
 
-## Getting Started
+## Verification Flow (Technical Detail)
 
-### Prerequisites
-
-- Node.js 18+
-- A [Supabase](https://supabase.com) project with the schema from `backend/src/models/schema.sql`
-- Payment API sandbox credentials
-
-### Install
-
-```bash
-git clone https://github.com/Abbey256/PayGuard-AI.git
-cd PayGuard-AI
-
-# Install backend dependencies
-cd backend && npm install
-
-# Install frontend dependencies
-cd ../frontend && npm install
+### 1. HR sends verification link
+```
+POST /api/verification/send
+→ Generates UUID token, stores in verification_requests
+→ Emails worker a link: /verify/:token
 ```
 
-### Configure environment variables
+### 2. Worker opens link — server issues signed challenge
+```
+GET /api/verify/:token
+→ Validates token (not expired, not completed)
+→ Issues HMAC-SHA256 signed nonce:
+   payload = { seq: ["smile","blink","headTurn"], ts, rnd, tok }
+   nonce   = base64url(payload) + "." + HMAC(payload, NONCE_SECRET)
+→ Returns: { workerName, photoUrl, challengeNonce, challengeSequence }
+```
 
-**`backend/.env`**
+### 3. Browser runs challenges in server-dictated order
+- EAR baseline calibrated during 2s positioning phase
+- Blink: adaptive threshold = 70% of baseline EAR (handles all eye shapes)
+- Head turn: ratio < 0.35 = left, > 0.65 = right
+- Smile: mouth width/height ratio > 3.3 held for 1000ms
+- Face compared against HR photo using cosine similarity on 468 landmarks
+
+### 4. Submit with nonce
+```
+POST /api/verify/submit
+Body: { token, challengeNonce, faceMatchScore, livenessData }
+→ Server verifies HMAC signature
+→ Checks nonce not expired (10 min TTL)
+→ Checks nonce not replayed (in-memory store)
+→ Checks nonce bound to this token
+→ Recomputes trust score server-side
+→ Marks token completed
+→ Updates staff status
+→ Auto-adds to payment batch
+```
+
+---
+
+## Payment Flow
+
+```
+Payment Batch (draft)
+  ↓ created automatically when staff verified
+Approve Batch (pending → approved)
+  ↓ HR clicks Approve
+Process Payment
+  ↓ HR types "APPROVE" to confirm
+  ↓ For each verified staff:
+      1. Squad account name lookup
+      2. Fuzzy name match (Jaro-Winkler)
+      3. If match → Squad payout transfer
+      4. If mismatch → blocked, audit logged
+```
+
+---
+
+## Environment Variables
+
+### Backend (`backend/.env`)
+
 ```env
 PORT=5000
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-PAYMENT_API_SECRET_KEY=your_payment_sandbox_key
-RESEND_API_KEY=your_email_api_key
-FRONTEND_URL=http://localhost:5173
+NODE_ENV=development
+FRONTEND_URL=https://your-domain.onrender.com
+
+# Supabase
+SUPABASE_URL=https://xxx.supabase.co
+SUPABASE_SERVICE_KEY=eyJ...
+
+# Squad Payment API
+SQUAD_SECRET_KEY=sandbox_sk_...
+SQUAD_PUBLIC_KEY=sandbox_pk_...
+
+# Email
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=PayGuard AI <support@yourdomain.com>
+
+# Anti-fraud nonce signing (generate with: node -e "require('crypto').randomBytes(32).toString('hex')")
+NONCE_SECRET=your-32-byte-hex-secret
 ```
 
-**`frontend/.env`**
+### Frontend (`frontend/.env`)
+
 ```env
-VITE_SUPABASE_URL=your_supabase_url
-VITE_SUPABASE_ANON_KEY=your_anon_key
-VITE_API_URL=http://localhost:5000
+VITE_API_URL=https://your-backend.onrender.com
+VITE_SUPABASE_URL=https://xxx.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJ...
 ```
 
-### Run
+---
+
+## Local Development
 
 ```bash
-# Terminal 1 — backend
-cd backend && npm run dev
+# Install all dependencies
+npm run install-all
 
-# Terminal 2 — frontend
-cd frontend && npm run dev
+# Run both frontend and backend concurrently
+npm run dev
+
+# Backend only (port 5000)
+npm run backend
+
+# Frontend only (port 5173)
+npm run frontend
 ```
 
-Frontend: http://localhost:5173  
-Backend health check: http://localhost:5000/health
+## Deployment (Render — single service)
+
+```
+Build Command:  npm run build
+Start Command:  npm run start
+```
+
+The build script installs backend + frontend deps and runs `vite build` which outputs to `backend/public`. Express serves the built React app as static files with React Router fallback.
 
 ---
 
-## Rubric Alignment (JAF BuildVerse 2026)
+## Database Schema
 
-| Criterion | Implementation |
-|-----------|---------------|
-| **Code Structure** | Monorepo: `ai/` (engine), `backend/` (API), `frontend/` (UI). Controllers, routes, services, middleware all separated |
-| **Functionality** | End-to-end flow: CSV upload → email → biometric scan → trust score → payment batch → disbursement |
-| **AI Depth** | MediaPipe FaceMesh (468 landmarks, 3D), challenge engine (blink/head/smile), cosine similarity face matching, hardware camera lock — all core to the product value |
-| **AI Output Quality** | Trust score is deterministic and explainable with a per-component breakdown. Hard mismatch zeros the score. Uncertain cases route to manual review |
-| **UX** | Mobile-first verification page, voice-guided challenges (Web Speech API), dark mode admin dashboard |
-| **Problem Definition** | Nigeria ghost worker crisis — ₦15–20B monthly leak, specific to disbursement-time verification gap |
-| **Focus Area** | Civic Engagement + Social Impact & Inclusion |
-| **Target User** | Government HR admins + public sector employees on any smartphone |
-| **Feasibility** | Browser-based AI (no GPU server), email delivery, works on low-end Android — designed for Nigerian infrastructure constraints |
-| **Scalability** | Architecture maps directly to AWS serverless (Lambda + API Gateway) — no re-architecture needed for production |
+Key tables in Supabase PostgreSQL:
 
----
+| Table | Purpose |
+|-------|---------|
+| `organizations` | Ministry/agency accounts |
+| `staff` | Employee records with status + trust_score |
+| `verification_requests` | One-time verification tokens |
+| `payment_batches` | Grouped salary disbursements |
+| `payment_batch_staff` | Staff ↔ batch junction |
+| `payment_records` | Per-transfer audit trail |
+| `audit_logs` | Security events (fraud attempts, approvals, payments) |
 
-## Key Design Decisions
-
-**Why client-side AI?**  
-Running inference in the worker's browser means no GPU cloud costs, works offline after initial load, and biometric data never leaves the device until a numeric score is transmitted.
-
-**Why geometric embeddings instead of a neural face model?**  
-Neural models (face-api.js) require 30–90 MB downloads and WebGL. On a ₦10,000 Android phone with 2G data, that fails. MediaPipe FaceMesh is already loaded for liveness — we derive identity comparison from the same landmark data at zero added cost.
-
-**Why Supabase for the hackathon?**  
-Speed of development. The schema, auth, and storage are production-grade. The migration path to AWS RDS + Cognito + S3 is a configuration change, not a rewrite.
+All tables have Row Level Security (RLS) — admins can only access their own organisation's data. The `anon` role can read verification_requests by token only (for the public /verify/:token page).
 
 ---
 
-## Known Limitations & Security Transparency
+## Roadmap — Production Hardening
 
-This section is intentionally honest. Hackathon judges and future engineers should understand what is production-ready and what is not.
-
-### What is production-ready in this build
-
-- **Server-side trust score recomputation** — The backend ignores the client-supplied `trustScore` and `verdict`. It recomputes both from the raw `livenessData` challenge booleans. A tampered POST to `/api/verify/submit` with `{trustScore: 100, verdict: "verified"}` does not bypass the gate — the server derives its own verdict and writes that to the database.
-- **Token single-use enforcement** — Verification tokens are marked `completed` before any DB updates, so replay attacks are blocked.
-- **Tenant isolation in RLS** — Database policies scope every query to the authenticated admin's own organisation. An HR admin from Ministry A cannot read Ministry B's staff or salary data, even via direct Supabase API calls.
-- **Hardware camera lock** — Virtual camera software (OBS, DroidCam, etc.) is detected and rejected before the biometric session starts.
-- **Rate limiting** — Verification endpoint is limited to 10 requests per 15 minutes per IP.
-
-### What requires production hardening before government deployment
-
-**BVN and bank account numbers stored as plaintext**
-BVN and `bank_account` are stored as `TEXT` columns in PostgreSQL. In production these must be encrypted at the column level using `pgcrypto` AES-256 or Supabase Vault (KMS envelope encryption) before any real government data is stored. This is a known gap, documented here for the next engineer.
-
-**Client-side face matching**
-The face comparison (cosine similarity on MediaPipe landmarks) runs in the worker's browser. The match score is submitted by the client and used as one input to the server's trust score formula — but the server cannot independently verify the face match without a server-side vision API. In production, a frame snapshot should be sent to Amazon Rekognition `CompareFaces` for independent server-side validation.
-
-**No 2FA for HR admin actions**
-Approving a payment batch and triggering disbursement currently requires only a Supabase JWT + typing "APPROVE". Production should require a second factor (OTP or hardware key) before any money moves.
-
-**Payment API is sandbox**
-All disbursements use the sandbox environment. Transfers are simulated — no real Naira moves. Switching to production requires a verified merchant account and compliance review.
+- [ ] **AWS Rekognition** — Server-side face verification (S3 bucket created, IAM configured)
+- [ ] **NIN/BVN verification** — NIMC/NIBSS API integration for government ID matching
+- [ ] **Redis** — Replace in-memory nonce store for multi-instance deployments
+- [ ] **BVN/bank account encryption** — pgcrypto or Supabase Vault (NDPR compliance)
+- [ ] **Squad live keys** — Switch from sandbox to production Squad environment
+- [ ] **AWS Lambda** — Migrate to serverless architecture (architecture diagram included)
 
 ---
 
-## Team
+## Security Notes
 
-- **Abiodun Olabisi** — Frontend Engineering & AI Architecture
-- **Najib Adebisi** — Backend Infrastructure & Payment Integration
+- All biometric processing runs in the browser — no video or images are sent to the server
+- Only numeric scores and challenge metadata are transmitted
+- The HMAC nonce system ensures verification sessions cannot be fabricated via API
+- Trust scores are always recomputed server-side — client values are ignored
+- Fraud attempts (invalid nonces) are logged to audit_logs with IP address
 
 ---
 
-*PayGuard AI — Because every Naira should reach a living, breathing human.*
+Built for the **2025 Hackathon** — solving ghost worker fraud in Nigerian government payroll.
