@@ -1,238 +1,195 @@
-# PayGuard AI - Verification Engine
+# PayGuard AI — Verification Engine
 
-Client-side AI modules for government payroll verification using MediaPipe and face-api.js.
+Client-side AI modules for government payroll biometric verification.  
+All processing runs in the worker's browser. No video or images are transmitted to the server — only the final numeric trust score.
 
-## Architecture
+## Module Map
 
 ```
-User Browser (Frontend)
-    ↓
-[Liveness Detection] ← MediaPipe FaceLandmarker
-    ↓ (0-100 score)
-[Face Matching] ← face-api.js + TensorFlow.js
-    ↓ (0-100 score)
-[Trust Score Calculator] ← Combines scores
-    ↓ (verdict: verified/review/flagged)
-[Backend Verification API]
-    ↓
-[Final Verdict + Payment Authorization]
+ai/
+├── liveness/livenessDetector.js   ← Challenge engine (blink, head-turn, smile)
+├── facematch/faceMatch.js         ← Cosine similarity face matching
+└── trustScore/trustScore.js       ← Score combinator + verdict engine
 ```
 
-## Modules
+The production implementations of these modules that run inside the React app live at `frontend/src/components/liveness/`. These `ai/` modules are the standalone, importable versions of the same algorithms — documented, tested independently, and usable outside the frontend bundle.
 
-### 1. Liveness Detection (`liveness/livenessDetector.js`)
+---
 
-**Purpose**: Ensure the person is real and present during verification
+## 1. Liveness Detection (`liveness/livenessDetector.js`)
 
-**Technology**: [MediaPipe Face Landmark Detection](https://mediapipe.dev/)
+Detects whether the person in the webcam is a live human being present at that moment.
 
-**What it detects**:
-- Natural blink patterns (15-30 blinks/min)
-- Head movement variation (yaw, pitch, roll)
-- Facial feature stability
-- Eye visibility and pupil response
-- Blood flow indicators (texture changes)
+**Technology:** MediaPipe FaceMesh — 468 3D facial landmarks per frame
 
-**Anti-spoofing**:
-- ✓ Rejects 2D printed photos
-- ✓ Rejects screen replay attacks
-- ✓ Detects silicone/latex masks
-- ✓ Requires eyes-open with natural blinks
+### Challenge Engine
 
-**Input**: Video stream from webcam
+| Challenge | Algorithm | Threshold |
+|-----------|-----------|-----------|
+| **Blink** | Eye Aspect Ratio (EAR) — vertical opening ÷ horizontal width | EAR < 0.22 = eye closed; requires 2 full close→open cycles |
+| **Head turn** | Nose-tip lateral ratio across cheek anchor points | Ratio < 0.38 = looking left; > 0.62 = looking right |
+| **Smile** | Mouth Aspect Ratio (MAR) — vertical opening ÷ mouth width | MAR > 0.06 sustained for ≥ 500 ms |
 
-**Output**:
-```javascript
-{
-  livenessScore: 95,        // 0-100
-  confidence: "high",
-  blinks: 12,               // Blinks during session
-  headMovement: true,
-  frameSamples: [...]       // For storage
-}
+### Anti-spoofing
+
+Challenges require genuine real-time facial motion — a static photo or looped video fails because the motion sequence cannot be pre-recorded for an arbitrary challenge order.
+
+**Hardware Camera Lock** — three-layer check:
+1. `getCapabilities()` API: physical cameras report `facingMode`; virtual drivers typically do not
+2. Label heuristic: rejects known virtual camera software (OBS, DroidCam, ManyCam, etc.)
+3. Device-list cross-reference: active `deviceId` must match an enumerated `videoinput`
+
+### Scoring
+
+```
+Base score:           +10  (for attempting)
+Per challenge passed: +25  (max 75 for 3/3)
+No static face:       +15
+Cap:                  100
+
+Verdict:  score ≥ 60 → verified   (minimum: 2/3 challenges)
+          score < 60 → flagged
 ```
 
-### 2. Face Matching (`facematch/faceMatch.js`)
-
-**Purpose**: Compare captured face against government ID or reference photo
-
-**Technology**: [face-api.js](https://github.com/justadudewhohacks/face-api.js) + TensorFlow.js
-
-**Process**:
-1. Detect faces in both images
-2. Extract 512-dimensional embedding vectors
-3. Calculate Euclidean distance
-4. Map distance to similarity score
-
-**Distance to Confidence Mapping**:
-- `< 0.50` → 95%+ confidence (Very High Match)
-- `0.50-0.60` → 70-94% confidence (Medium Match)
-- `> 0.60` → Below 70% confidence (Low/No Match)
-
-**Input**: 
-- Reference image (government ID/passport)
-- Captured image (from liveness session)
-
-**Output**:
-```javascript
-{
-  matchScore: 92,           // 0-100
-  distance: 0.45,           // Euclidean distance
-  isMatch: true,
-  confidence: "high",
-  alignmentIssues: false
-}
-```
-
-### 3. Trust Score Calculator (`trustScore/trustScore.js`)
-
-**Purpose**: Combine all verification factors into single trust verdict
-
-**Calculation**:
-```
-Trust Score = (Liveness × 0.35) + (Face Match × 0.35) + (Challenges × 0.20) + (Account Match × 0.10)
-```
-
-**Verdicts**:
-- **Verified** (✓): Score ≥ 90%
-  - Safe to process payments
-  - No manual review needed
-- **Review** (⚠): Score 70-89%
-  - Limited transactions allowed
-  - Manual verification within 24h
-- **Flagged** (✗): Score < 70%
-  - Payment blocked
-  - Manual verification required
-
-**Output**:
-```javascript
-{
-  score: 87,
-  verdict: "review",
-  isVerified: false,
-  requiresReview: true,
-  isFlagged: false,
-  breakdown: {
-    liveness: 95,
-    facematch: 85,
-    challenges: 80,
-    accountName: 100
-  }
-}
-```
-
-## Installation
-
-### Frontend Dependencies
-
-```bash
-npm install @mediapipe/tasks-vision face-api.js @tensorflow/tfjs
-```
-
-### Usage Example
+### API
 
 ```javascript
-import { detectLiveness } from "./liveness/livenessDetector.js";
-import { compareFaces } from "./facematch/faceMatch.js";
-import { calculateClientTrustScore } from "./trustScore/trustScore.js";
+import {
+  computeEAR,        // (landmarks, eyeConfig) → number
+  processBlink,      // (state, ear) → state
+  computeHeadRatio,  // (landmarks) → number
+  processHeadTurn,   // (state, ratio) → state
+  computeMouthRatio, // (landmarks) → number
+  processSmile,      // (state, mar, deltaMs) → state
+  evaluateLiveness,  // ({ challengesPassed, staticFaceDetected }) → result
+  verifyHardwareCamera, // (MediaStream) → Promise<{ isHardware, reason }>
+} from './liveness/livenessDetector.js';
+```
 
-// During verification flow
-const livenessResult = await detectLiveness(videoElement, 5000);
-const faceMatchResult = await compareFaces(referenceImage, capturedImage);
+---
 
-const trustScore = calculateClientTrustScore({
-  livenessScore: livenessResult.score,
-  facematchScore: faceMatchResult.matchScore,
-  challengesPassed: 3,
-  challengesTotal: 3,
-  accountNameMatch: true
+## 2. Face Matching (`facematch/faceMatch.js`)
+
+1:1 identity comparison: live worker vs. HR-uploaded reference photo.
+
+**Why geometric matching instead of a neural embedding model?**  
+Neural face models (face-api.js) require 30–90 MB downloads and WebGL. On a low-end Android phone with limited data, that fails. MediaPipe FaceMesh is already loaded for liveness — we derive identity comparison from the same 468 landmark coordinates at zero added cost.
+
+### Embedding Strategy
+
+```
+1. Compute centroid of all 468 landmarks           → translation invariance
+2. Subtract centroid from each point
+3. Divide by inter-ocular distance (IOD)           → scale invariance
+4. Flatten [x, y, z, x, y, z, …] → Float32Array   length = 468 × 3 = 1404
+```
+
+Cosine similarity between two such vectors:
+- `1.0` = geometrically identical faces
+- `~0`  = unrelated faces
+
+### Thresholds
+
+| Similarity | Verdict | Action |
+|------------|---------|--------|
+| ≥ 0.85 | `confirmed` | Identity verified |
+| 0.80–0.85 | `uncertain` | Manual HR review |
+| < 0.80 | `mismatch` | Payment blocked, trust score → 0 |
+
+### API
+
+```javascript
+import {
+  buildEmbedding,            // (landmarks) → Float32Array
+  cosineSimilarity,          // (vecA, vecB) → number [0,1]
+  compareFaces,              // (liveLandmarks, referenceEmbedding) → result
+  extractReferenceEmbedding, // (photoUrl, FaceMesh) → Promise<Float32Array|null>
+  SIMILARITY_THRESHOLDS,
+} from './facematch/faceMatch.js';
+
+// Example
+const refEmbed = await extractReferenceEmbedding(staffPhotoUrl, FaceMesh);
+const result   = compareFaces(currentFrameLandmarks, refEmbed);
+// result → { score, verdict, matchScore, alert }
+```
+
+---
+
+## 3. Trust Score Calculator (`trustScore/trustScore.js`)
+
+Combines liveness and face-match results into the final payment decision.
+
+### Formula
+
+```
+Trust Score = (Liveness Score × 0.50) + (Face Match Score × 0.50)
+```
+
+Both inputs are normalised to [0, 100] before weighting.
+
+**Hard block:** if `faceMatchVerdict === 'mismatch'`, trust score is **zeroed** regardless of liveness result.
+
+### Verdicts
+
+| Score | Verdict | Payment outcome |
+|-------|---------|-----------------|
+| ≥ 90 | `verified` | Salary disbursed automatically |
+| 70–89 | `review` | Payment held, HR notified within 24 h |
+| < 70 | `flagged` | Payment blocked, ghost worker alert |
+
+### API
+
+```javascript
+import {
+  calculateTrustScore,           // ({ livenessScore, faceMatchScore, faceMatchVerdict }) → result
+  getVerdictStyle,               // (verdict) → { bg, text, hex }
+  getVerdictMessage,             // (verdict) → { title, message }
+  calculateVerificationProgress, // ({ livenessScore, faceMatchScore }) → 0–100
+  VERDICT_THRESHOLDS,
+} from './trustScore/trustScore.js';
+
+// Full pipeline example
+const liveness  = evaluateLiveness({ challengesPassed: 3, staticFaceDetected: false });
+const faceMatch = compareFaces(liveLandmarks, referenceEmbedding);
+
+const trust = calculateTrustScore({
+  livenessScore:    liveness.livenessScore,
+  faceMatchScore:   faceMatch.matchScore,
+  faceMatchVerdict: faceMatch.verdict,
 });
 
-if (trustScore.verdict === "verified") {
-  // Send to backend for payment processing
-  await api.submitVerification(trustScore);
-}
+console.log(trust);
+// {
+//   trustScore: 92,
+//   verdict: 'verified',
+//   isVerified: true,
+//   requiresReview: false,
+//   isFlagged: false,
+//   breakdown: { livenessContribution: 50, faceMatchContribution: 42 }
+// }
 ```
 
-## Performance Notes
-
-- **Liveness Detection**: ~5-10 seconds (requires 3-5 blinks)
-- **Face Matching**: ~1-2 seconds
-- **Trust Score Calc**: <100ms
-- **Total Verification**: ~10-15 seconds
+---
 
 ## Browser Requirements
 
-- Webcam access (getUserMedia)
-- WebGL support for TensorFlow.js
-- Modern browser (Chrome, Firefox, Safari, Edge)
+- Camera access (`getUserMedia`)
+- WebGL (for MediaPipe WASM)
+- Modern browser: Chrome 90+, Firefox 88+, Safari 15+, Edge 90+
+- HTTPS required in production (camera API + `enumerateDevices`)
 
-## Privacy & Security
+## Privacy
 
-- ✓ All processing happens in browser
-- ✓ No video/image sent to servers until verified
-- ✓ Encrypted transmission to backend
-- ✓ No storage of raw biometric data
-- ✓ Only embedding vectors + scores sent to backend
-- ✓ GDPR compliant (local processing)
+- No video frames leave the device
+- No raw images stored anywhere
+- Only the numeric trust score and challenge metadata are sent to the backend
+- Biometric processing is entirely ephemeral — session memory only
 
-## Fallback Handling
+## Performance
 
-If MediaPipe/face-api fails:
-1. Automatic retry up to 3 times
-2. Fall back to server-side verification
-3. User prompted for manual verification
-4. Support escalation available
-
-## Future Enhancements
-
-- [ ] 3D liveness detection (depth sensor)
-- [ ] Real-time feedback UI ("Too dark", "Move closer")
-- [ ] Offline mode caching
-- [ ] Multi-angle verification
-- [ ] Iris pattern recognition
-- [ ] Emotion detection (smile/neutral)
-
-## Model Files
-
-Models are loaded from CDN:
-- MediaPipe: `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest`
-- face-api.js: `https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js`
-
-For offline/production, download and host locally:
-```bash
-# TensorFlow.js models
-https://cdn.jsdelivr.net/npm/@tensorflow/tfjs/dist/tf.min.js
-```
-
-## Troubleshooting
-
-### "Webcam permission denied"
-- User must allow camera access in browser
-- Check browser privacy settings
-
-### "Face not detected"
-- Ensure good lighting
-- Position face within frame
-- Remove glasses/masks
-
-### "MediaPipe initialization failed"
-- Check internet connection (CDN access)
-- Browser supports WebGL
-- Try different browser
-
-### "Low liveness score"
-- Move head more naturally
-- Ensure multiple blinks
-- Better lighting needed
-
-## Architecture Decisions
-
-1. **Client-side Processing**: Speed, privacy, offline capability
-2. **MediaPipe + face-api**: Best balance of accuracy and performance
-3. **Embedding Vectors**: 512-D for face recognition (industry standard)
-4. **Weighted Scoring**: Prioritizes liveness + face match (70% combined)
-
-## License
-
-Proprietary - PayGuard Inc.
+| Step | Time |
+|------|------|
+| MediaPipe initialisation | 1–3 s (CDN load, one-time) |
+| Reference embedding extraction | ~500 ms |
+| Full challenge sequence | 10–15 s |
+| Trust score calculation | < 5 ms |

@@ -4,9 +4,91 @@
  *
  * GET  /api/verify/:token  → validateToken
  * POST /api/verify/submit  → submitVerification
+ *
+ * SECURITY NOTE — server-side trust score recomputation
+ * ──────────────────────────────────────────────────────
+ * The client submits livenessData (challenge booleans) but NOT the trust score.
+ * The server recomputes the trust score from those challenge results so that
+ * a tampered POST body (e.g. { trustScore: 100, verdict: "verified" }) cannot
+ * bypass the biometric gate. The client-supplied trustScore and verdict fields
+ * are intentionally ignored.
  */
 
 import { supabase } from "../services/supabaseClient.js";
+
+// ─── Server-side trust score computation ─────────────────────────────────────
+// Mirrors the formula in ai/trustScore/trustScore.js.
+// Kept inline here so verifyController has zero external dependencies and
+// the gate logic is always visible in a security review.
+
+const LIVENESS_WEIGHTS = {
+  BASE:       10,   // awarded for attempting
+  PER_CHALLENGE: 25, // per challenge passed (max 3 → 75)
+  LIVENESS_BONUS: 15, // if no static face detected
+};
+
+const FACE_MATCH_WEIGHT = 0.50; // 50% of final score
+const LIVENESS_WEIGHT   = 0.50; // 50% of final score
+
+/**
+ * Recomputes trust score and verdict entirely from submitted challenge data.
+ * The face match score sent by the client is accepted as an input component
+ * but the FINAL verdict is computed here — never trusted from the request body.
+ *
+ * @param {Object} livenessData - Challenge results from the browser session
+ * @param {number} clientFaceMatchScore - 0–100 face match score from browser
+ * @returns {{ serverTrustScore: number, serverVerdict: string }}
+ */
+function recomputeTrustScore(livenessData, clientFaceMatchScore) {
+  const {
+    blinkDetected       = false,
+    headTurnDetected    = false,
+    smileDetected       = false,
+    challengesPassed    = 0,
+    staticFaceDetected  = false,
+  } = livenessData ?? {};
+
+  // Count from individual booleans as a cross-check against challengesPassed
+  const booleanCount =
+    (blinkDetected    ? 1 : 0) +
+    (headTurnDetected ? 1 : 0) +
+    (smileDetected    ? 1 : 0);
+
+  // Use the higher of the two counts (generous — benefits the worker)
+  // but cap at 3 to prevent manipulation
+  const confirmedChallenges = Math.min(3, Math.max(booleanCount, challengesPassed ?? 0));
+
+  // Liveness score (0–100)
+  let livenessScore = LIVENESS_WEIGHTS.BASE;
+  livenessScore += confirmedChallenges * LIVENESS_WEIGHTS.PER_CHALLENGE;
+  if (!staticFaceDetected) livenessScore += LIVENESS_WEIGHTS.LIVENESS_BONUS;
+  livenessScore = Math.min(100, livenessScore);
+
+  // Face match score — clamp the client value to [0, 100]
+  const faceMatchScore = Math.max(0, Math.min(100, clientFaceMatchScore ?? 0));
+
+  // Combined score
+  const rawScore = (livenessScore * LIVENESS_WEIGHT) + (faceMatchScore * FACE_MATCH_WEIGHT);
+  const serverTrustScore = Math.round(Math.min(100, rawScore) * 100) / 100;
+
+  // Verdict
+  let serverVerdict;
+  if (serverTrustScore >= 90) {
+    serverVerdict = "verified";
+  } else if (serverTrustScore >= 70) {
+    serverVerdict = "review";
+  } else {
+    serverVerdict = "flagged";
+  }
+
+  // Hard block: if liveness completely failed (no challenges + static face),
+  // override verdict regardless of face match score
+  if (confirmedChallenges === 0 && staticFaceDetected) {
+    return { serverTrustScore: 0, serverVerdict: "flagged" };
+  }
+
+  return { serverTrustScore, serverVerdict };
+}
 
 /**
  * GET /api/verify/:token
@@ -81,38 +163,46 @@ export async function validateToken(req, res, next) {
 /**
  * POST /api/verify/submit
  *
- * Receives the liveness result from the LivenessScanner, validates the token,
- * then updates both `verification_requests` and `staff` records.
+ * Receives liveness challenge results from the browser, RECOMPUTES the trust
+ * score server-side, and updates both verification_requests and staff records.
+ *
+ * The client-supplied trustScore and verdict are IGNORED — the server derives
+ * its own verdict from livenessData. This closes the bypass where anyone
+ * could POST { trustScore: 100, verdict: "verified" } to skip biometrics.
  *
  * Expected request body:
  *   {
- *     token: string,
- *     trustScore: number,
- *     verdict: "verified" | "flagged",
+ *     token:          string,
+ *     trustScore:     number,   ← ignored, server recomputes
+ *     verdict:        string,   ← ignored, server recomputes
+ *     faceMatchScore: number,   ← 0-100 from browser cosine similarity
  *     livenessData: {
- *       blinkCount: number,
- *       headMovementDetected: boolean,
- *       smileDetected: boolean,
+ *       blinkDetected:     boolean,
+ *       headTurnDetected:  boolean,
+ *       smileDetected:     boolean,
+ *       challengesPassed:  number,
  *       staticFaceDetected: boolean,
- *       completionTimeSeconds: number,
- *       challengesPassedCount: number
+ *       snapshot:          string   ← base64 JPEG (stored for audit)
  *     }
  *   }
  *
- * Response matrix:
- *   200  { success: true }                          — both records updated
- *   409  { message }                                — token not found or already used
+ * Response:
+ *   200  { success: true, verdict, trustScore }  — records updated
+ *   400  { message }                             — missing photo
+ *   409  { message }                             — token used / not found
  */
 export async function submitVerification(req, res, next) {
   try {
-    const { token, trustScore, verdict, livenessData } = req.body;
+    const { token, faceMatchScore, livenessData } = req.body;
+    // NOTE: req.body.trustScore and req.body.verdict are intentionally destructured
+    // but not used — server always recomputes from livenessData below.
 
-    // Validate token — reject if not found or already completed.
+    // ── 1. Validate token ─────────────────────────────────────────────────────
     const { data: verificationRequest, error: fetchError } = await supabase
       .from("verification_requests")
       .select(`
-        id, 
-        staff_id, 
+        id,
+        staff_id,
         status,
         staff (
           first_name,
@@ -131,23 +221,33 @@ export async function submitVerification(req, res, next) {
     }
 
     if (!verificationRequest.staff.photo_url) {
-      return res.status(400).json({ message: "No reference photo available for face matching. Contact HR." });
+      return res.status(400).json({
+        message: "No reference photo on record for this staff member. Contact HR to upload a photo before verification.",
+      });
     }
 
     const { id: verificationId, staff_id: staffId } = verificationRequest;
-    
-    // Update verification_requests — status must be 'completed' so the
-    // token cannot be re-used (guard at line 122 checks status === 'completed').
+
+    // ── 2. SERVER-SIDE trust score recomputation ──────────────────────────────
+    // The client-supplied score is never written to the DB.
+    const { serverTrustScore, serverVerdict } = recomputeTrustScore(
+      livenessData,
+      faceMatchScore,
+    );
+
+    console.log(`[PayGuard] Server recomputed — score: ${serverTrustScore}, verdict: ${serverVerdict}`);
+
+    // ── 3. Mark token as consumed (prevents replay) ───────────────────────────
     const { error: verificationUpdateError } = await supabase
       .from("verification_requests")
       .update({
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        liveness_score: trustScore,
-        final_score: trustScore, 
-        final_verdict: verdict,
+        status:           "completed",
+        completed_at:     new Date().toISOString(),
+        liveness_score:   serverTrustScore,
+        final_score:      serverTrustScore,
+        final_verdict:    serverVerdict,
         challenges_passed: livenessData?.challengesPassed ?? 0,
-        challenges_total: 3,
+        challenges_total:  3,
       })
       .eq("id", verificationId);
 
@@ -156,17 +256,13 @@ export async function submitVerification(req, res, next) {
       throw verificationUpdateError;
     }
 
-    const isVerified = verdict === "verified";
-
-    // Update staff record — only the columns that definitely exist in the schema.
-    const staffUpdate = {
-      status: verdict,
-      trust_score: trustScore,
-    };
-
+    // ── 4. Update staff record with SERVER verdict ────────────────────────────
     const { error: staffUpdateError } = await supabase
       .from("staff")
-      .update(staffUpdate)
+      .update({
+        status:      serverVerdict,
+        trust_score: serverTrustScore,
+      })
       .eq("id", staffId);
 
     if (staffUpdateError) {
@@ -174,14 +270,14 @@ export async function submitVerification(req, res, next) {
       throw staffUpdateError;
     }
 
-    // --- AUTOMATIC PAYMENT BATCH CREATION / ADDITION ---
-    if (isVerified) {
-      const orgId = verificationRequest.staff.organization_id;
+    // ── 5. Auto-add to payment batch if verified ──────────────────────────────
+    if (serverVerdict === "verified") {
+      const orgId  = verificationRequest.staff.organization_id;
       const salary = verificationRequest.staff.salary || 0;
-      const currentMonth = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-      const batchName = `Salary Batch - ${currentMonth}`;
+      const monthLabel = new Date().toLocaleString("default", { month: "long", year: "numeric" });
+      const batchName  = `Salary Batch - ${monthLabel}`;
 
-      // 1. Check if a pending batch already exists for this organization
+      // Find or create a pending batch for this org
       let { data: batch, error: batchError } = await supabase
         .from("payment_batches")
         .select("id, staff_count, total_amount")
@@ -191,13 +287,11 @@ export async function submitVerification(req, res, next) {
         .limit(1)
         .single();
 
-      if (batchError && batchError.code !== 'PGRST116') {
+      if (batchError && batchError.code !== "PGRST116") {
         console.error("Error fetching payment batch:", batchError);
       }
 
-      // 2. Create one if it doesn't exist
       if (!batch) {
-        // Fetch org to get admin_id for created_by
         const { data: orgData } = await supabase
           .from("organizations")
           .select("admin_id")
@@ -208,61 +302,63 @@ export async function submitVerification(req, res, next) {
           .from("payment_batches")
           .insert({
             organization_id: orgId,
-            batch_name: batchName,
-            staff_count: 0,
-            total_amount: 0,
-            status: "pending",
-            created_by: orgData?.admin_id
+            batch_name:      batchName,
+            staff_count:     0,
+            total_amount:    0,
+            status:          "pending",
+            created_by:      orgData?.admin_id,
           })
           .select()
           .single();
-          
+
         if (createError) console.error("Failed to create batch:", createError);
         batch = newBatch;
       }
 
-      // 3. Add staff to the batch if not already added
       if (batch) {
-        const { data: existingStaff } = await supabase
+        const { data: existingEntry } = await supabase
           .from("payment_batch_staff")
           .select("staff_id")
           .eq("batch_id", batch.id)
           .eq("staff_id", staffId)
           .single();
 
-        if (!existingStaff) {
-          // Insert into payment_batch_staff
-          await supabase.from("payment_batch_staff").insert({
-            batch_id: batch.id,
-            staff_id: staffId
-          });
-
-          // Update batch totals
+        if (!existingEntry) {
+          await supabase.from("payment_batch_staff").insert({ batch_id: batch.id, staff_id: staffId });
           await supabase
             .from("payment_batches")
             .update({
-              staff_count: batch.staff_count + 1,
-              total_amount: batch.total_amount + salary
+              staff_count:  batch.staff_count  + 1,
+              total_amount: batch.total_amount + salary,
             })
             .eq("id", batch.id);
         }
       }
     }
 
-    // Log to audit_logs
-    await supabase.from('audit_logs').insert({
-      action: 'STAFF_VERIFIED',
-      entity_type: 'staff',
-      entity_id: staffId,
-      changes: { 
-        verdict, 
-        trustScore,
-        previousStatus: 'pending'
+    // ── 6. Audit log ──────────────────────────────────────────────────────────
+    await supabase.from("audit_logs").insert({
+      action:      "STAFF_VERIFIED",
+      entity_type: "staff",
+      entity_id:   staffId,
+      changes: {
+        serverVerdict,
+        serverTrustScore,
+        challengesPassed:  livenessData?.challengesPassed ?? 0,
+        blinkDetected:     livenessData?.blinkDetected    ?? false,
+        headTurnDetected:  livenessData?.headTurnDetected ?? false,
+        smileDetected:     livenessData?.smileDetected    ?? false,
+        previousStatus:    "pending",
+        note: "Trust score computed server-side. Client-supplied score ignored.",
       },
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
     });
 
-    return res.status(200).json({ success: true, verdict });
+    return res.status(200).json({
+      success:    true,
+      verdict:    serverVerdict,
+      trustScore: serverTrustScore,
+    });
   } catch (error) {
     next(error);
   }

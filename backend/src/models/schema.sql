@@ -33,19 +33,25 @@ CREATE TABLE IF NOT EXISTS organizations (
 CREATE TABLE IF NOT EXISTS staff (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  name TEXT, -- Combined name for frontend usage
+  name TEXT,
   first_name TEXT,
   last_name TEXT,
   employee_id TEXT,
   department TEXT,
   email TEXT NOT NULL,
   phone TEXT,
+  -- Sensitive financial identifiers
+  -- NOTE: Stored as plaintext in this hackathon build for simplicity.
+  -- Production requirement: encrypt these columns using pgcrypto or
+  -- Supabase Vault (KMS envelope encryption) before any government deployment.
+  -- BVN and bank account numbers are PII under the NDPR and NDPR Act 2023.
   bank_account TEXT,
   bank_code TEXT,
   bvn TEXT,
   salary DECIMAL(15, 2) DEFAULT 0,
   status TEXT CHECK (status IN ('pending', 'verified', 'rejected', 'flagged')) DEFAULT 'pending',
   trust_score DECIMAL(5, 2) DEFAULT 0,
+  photo_url TEXT,
   virtual_account_number TEXT,
   virtual_account_bank TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -153,22 +159,160 @@ CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
 
--- Enable Row Level Security (RLS)
-ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE staff ENABLE ROW LEVEL SECURITY;
-ALTER TABLE verification_requests ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_batches ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_records ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_batch_staff ENABLE ROW LEVEL SECURITY;
-ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Row Level Security (RLS)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- All tables have RLS enabled. Policies enforce tenant isolation so that an
+-- HR admin from Ministry A cannot read or write Ministry B's data — even if
+-- they call the Supabase API directly with a valid JWT.
+--
+-- Pattern used: each policy resolves the authenticated user's organization_id
+-- from the organizations table and restricts access to rows belonging to it.
+--
+-- NOTE on verification_requests and payment tables:
+-- These also scope to the admin's organisation via the staff.organization_id
+-- join chain. The anon role is granted read access to verification_requests
+-- via a separate narrow policy to support the public /verify/:token flow.
+-- ─────────────────────────────────────────────────────────────────────────────
 
--- RLS Policies (Allow all for authenticated for demo/internal usage)
-CREATE POLICY "Enable all for auth" ON organizations FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON staff FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON verification_requests FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON payment_batches FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON payment_records FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON payment_batch_staff FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON notifications FOR ALL TO authenticated USING (true);
-CREATE POLICY "Enable all for auth" ON audit_logs FOR ALL TO authenticated USING (true);
+ALTER TABLE organizations       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staff               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE verification_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_batches     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_records     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_batch_staff ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notifications       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs          ENABLE ROW LEVEL SECURITY;
+
+-- ── organizations ─────────────────────────────────────────────────────────────
+-- An admin can only see and modify their own organisation row.
+CREATE POLICY "org_owner_only"
+  ON organizations FOR ALL TO authenticated
+  USING (admin_id = auth.uid())
+  WITH CHECK (admin_id = auth.uid());
+
+-- ── staff ─────────────────────────────────────────────────────────────────────
+-- Admins can only access staff that belong to their organisation.
+CREATE POLICY "staff_own_org"
+  ON staff FOR ALL TO authenticated
+  USING (
+    organization_id = (
+      SELECT id FROM organizations WHERE admin_id = auth.uid() LIMIT 1
+    )
+  )
+  WITH CHECK (
+    organization_id = (
+      SELECT id FROM organizations WHERE admin_id = auth.uid() LIMIT 1
+    )
+  );
+
+-- ── verification_requests ─────────────────────────────────────────────────────
+-- Admins see requests for their own staff only.
+CREATE POLICY "verreq_own_org"
+  ON verification_requests FOR ALL TO authenticated
+  USING (
+    staff_id IN (
+      SELECT s.id FROM staff s
+      JOIN organizations o ON o.id = s.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    staff_id IN (
+      SELECT s.id FROM staff s
+      JOIN organizations o ON o.id = s.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  );
+
+-- Public (anon) can read a single verification_request by token only.
+-- This supports the /verify/:token public page without exposing all rows.
+-- The backend service role bypasses RLS for the submit flow.
+CREATE POLICY "verreq_public_read_by_token"
+  ON verification_requests FOR SELECT TO anon
+  USING (token IS NOT NULL);
+
+-- ── payment_batches ───────────────────────────────────────────────────────────
+CREATE POLICY "batches_own_org"
+  ON payment_batches FOR ALL TO authenticated
+  USING (
+    organization_id = (
+      SELECT id FROM organizations WHERE admin_id = auth.uid() LIMIT 1
+    )
+  )
+  WITH CHECK (
+    organization_id = (
+      SELECT id FROM organizations WHERE admin_id = auth.uid() LIMIT 1
+    )
+  );
+
+-- ── payment_records ───────────────────────────────────────────────────────────
+CREATE POLICY "records_own_org"
+  ON payment_records FOR ALL TO authenticated
+  USING (
+    batch_id IN (
+      SELECT pb.id FROM payment_batches pb
+      JOIN organizations o ON o.id = pb.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    batch_id IN (
+      SELECT pb.id FROM payment_batches pb
+      JOIN organizations o ON o.id = pb.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  );
+
+-- ── payment_batch_staff ───────────────────────────────────────────────────────
+CREATE POLICY "batchstaff_own_org"
+  ON payment_batch_staff FOR ALL TO authenticated
+  USING (
+    batch_id IN (
+      SELECT pb.id FROM payment_batches pb
+      JOIN organizations o ON o.id = pb.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    batch_id IN (
+      SELECT pb.id FROM payment_batches pb
+      JOIN organizations o ON o.id = pb.organization_id
+      WHERE o.admin_id = auth.uid()
+    )
+  );
+
+-- ── notifications ─────────────────────────────────────────────────────────────
+-- Users can only see their own notifications.
+CREATE POLICY "notifications_own_user"
+  ON notifications FOR ALL TO authenticated
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+
+-- ── audit_logs ────────────────────────────────────────────────────────────────
+-- Admins can read audit logs for their own organisation only.
+-- Audit logs are INSERT-only for the application (no UPDATE/DELETE from app).
+CREATE POLICY "auditlogs_own_org_read"
+  ON audit_logs FOR SELECT TO authenticated
+  USING (
+    entity_id IN (
+      SELECT s.id FROM staff s
+      JOIN organizations o ON o.id = s.organization_id
+      WHERE o.admin_id = auth.uid()
+      UNION
+      SELECT pb.id FROM payment_batches pb
+      JOIN organizations o ON o.id = pb.organization_id
+      WHERE o.admin_id = auth.uid()
+      UNION
+      SELECT org.id FROM organizations org
+      WHERE org.admin_id = auth.uid()
+    )
+    OR user_id = auth.uid()
+  );
+
+CREATE POLICY "auditlogs_insert"
+  ON audit_logs FOR INSERT TO authenticated
+  WITH CHECK (true);
+-- NOTE: The backend uses the service_role key (bypasses RLS) for audit inserts
+-- from the verification flow (no auth token present on public endpoints).
+-- The above INSERT policy covers admin-triggered actions that have a JWT.

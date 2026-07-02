@@ -1,189 +1,166 @@
 /**
- * Trust Score Service (Client-side)
- * Calculates trust score locally before sending to backend
- * Mirrors the backend trustScoreService for preview
+ * Trust Score Calculator
+ * Combines liveness and face-match results into a single scored verdict.
  *
- * This module allows the frontend to:
- * - Show real-time trust score updates as verification progresses
- * - Provide feedback to the user during liveness/face match
- * - Validate data before sending to backend
- * - Calculate preliminary verdict before backend confirmation
+ * This module is the decision engine for PayGuard AI.
+ * It determines whether a staff member's salary payment proceeds, is held
+ * for manual review, or is blocked entirely.
+ *
+ * Scoring formula:
+ * ────────────────
+ *   Liveness score  × 0.50   (challenges: blink, head-turn, smile)
+ *   Face match score × 0.50  (cosine similarity vs. reference photo)
+ *
+ * Both inputs are normalised to [0, 100] before weighting.
+ * The combined score is also capped at 100.
+ *
+ * Verdicts:
+ *   ≥ 90  → verified  — payment proceeds automatically
+ *   70–89 → review    — payment held, manual HR review within 24 h
+ *   < 70  → flagged   — payment blocked, ghost worker alert raised
+ *
+ * Face-match hard block:
+ *   If the face-match verdict is 'mismatch' (cosine < 0.80), the final
+ *   verdict is ALWAYS 'flagged' and the trust score is zeroed,
+ *   regardless of the liveness score.
  */
 
-import { calculateTrustScore as backendCalc } from "../../backend/src/services/trustScoreService.js";
+// ─── Verdict thresholds ───────────────────────────────────────────────────────
+
+export const VERDICT_THRESHOLDS = {
+  VERIFIED: 90,
+  REVIEW:   70,
+};
+
+// ─── Main calculator ──────────────────────────────────────────────────────────
 
 /**
- * Client-side mirror of backend trust score calculation
- * Used for preview only - backend performs final calculation
- * @param {Object} verificationData - All verification components
- * @returns {Object} Trust score, verdict, and confidence
+ * Calculates the combined trust score and final verdict.
+ *
+ * @param {{
+ *   livenessScore:    number,                           // 0–100 from evaluateLiveness()
+ *   faceMatchScore:   number,                           // 0–100 from compareFaces()
+ *   faceMatchVerdict: 'confirmed'|'uncertain'|'mismatch'
+ * }} inputs
+ *
+ * @returns {{
+ *   trustScore:     number,                             // 0–100
+ *   verdict:        'verified'|'review'|'flagged',
+ *   isVerified:     boolean,
+ *   requiresReview: boolean,
+ *   isFlagged:      boolean,
+ *   breakdown: {
+ *     livenessContribution: number,
+ *     faceMatchContribution: number,
+ *   }
+ * }}
  */
-export function calculateClientTrustScore(verificationData) {
-  const {
-    livenessScore = 0,
-    facematchScore = 0,
-    challengesPassed = 0,
-    challengesTotal = 1,
-    accountNameMatch = false,
-  } = verificationData;
+export function calculateTrustScore({ livenessScore, faceMatchScore, faceMatchVerdict }) {
+  // Normalise inputs to [0, 100]
+  const liveness   = Math.max(0, Math.min(100, livenessScore  ?? 0));
+  const faceMatch  = Math.max(0, Math.min(100, faceMatchScore ?? 0));
 
-  // Normalize all inputs to 0-100 range
-  const normalizedLiveness = Math.max(0, Math.min(100, livenessScore || 0));
-  const normalizedFacematch = Math.max(0, Math.min(100, facematchScore || 0));
-  const challengeScore = (challengesPassed / Math.max(1, challengesTotal)) * 100;
-  const normalizedChallenges = Math.max(0, Math.min(100, challengeScore));
-  const accountScore = accountNameMatch ? 100 : 0;
+  // Hard block: face mismatch overrides everything
+  if (faceMatchVerdict === 'mismatch') {
+    return {
+      trustScore:     0,
+      verdict:        'flagged',
+      isVerified:     false,
+      requiresReview: false,
+      isFlagged:      true,
+      breakdown: {
+        livenessContribution:   0,
+        faceMatchContribution:  0,
+      },
+    };
+  }
 
-  // Weighted calculation (must match backend)
-  const weightedScore =
-    normalizedLiveness * 0.35 +
-    normalizedFacematch * 0.35 +
-    normalizedChallenges * 0.2 +
-    accountScore * 0.1;
+  const livenessContrib   = liveness  * 0.5;
+  const faceMatchContrib  = faceMatch * 0.5;
+  const rawScore          = livenessContrib + faceMatchContrib;
+  const trustScore        = Math.min(100, Math.round(rawScore * 100) / 100);
 
-  // Determine verdict
-  let verdict = "flagged";
-  if (weightedScore >= 90) {
-    verdict = "verified";
-  } else if (weightedScore >= 70) {
-    verdict = "review";
+  let verdict;
+  if (trustScore >= VERDICT_THRESHOLDS.VERIFIED) {
+    verdict = 'verified';
+  } else if (trustScore >= VERDICT_THRESHOLDS.REVIEW) {
+    verdict = 'review';
+  } else {
+    verdict = 'flagged';
   }
 
   return {
-    score: Math.round(weightedScore * 100) / 100,
+    trustScore,
     verdict,
+    isVerified:     verdict === 'verified',
+    requiresReview: verdict === 'review',
+    isFlagged:      verdict === 'flagged',
     breakdown: {
-      liveness: Math.round(normalizedLiveness),
-      facematch: Math.round(normalizedFacematch),
-      challenges: Math.round(normalizedChallenges),
-      accountName: accountScore,
+      livenessContribution:  Math.round(livenessContrib  * 100) / 100,
+      faceMatchContribution: Math.round(faceMatchContrib * 100) / 100,
     },
-    isVerified: verdict === "verified",
-    requiresReview: verdict === "review",
-    isFlagged: verdict === "flagged",
   };
 }
 
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+
 /**
- * Get color for UI display based on verdict
- * @param {string} verdict - Trust verdict
- * @returns {Object} Color codes for different frameworks
+ * Returns Tailwind colour classes for a given verdict.
+ *
+ * @param {'verified'|'review'|'flagged'} verdict
+ * @returns {{ bg: string, text: string, hex: string }}
  */
-export function getVerdictColors(verdict) {
-  const colors = {
-    verified: {
-      tailwind: "bg-green-500 text-white",
-      hex: "#10B981",
-      rgb: "16, 185, 129",
-      badge: "success",
-    },
-    review: {
-      tailwind: "bg-yellow-500 text-white",
-      hex: "#F59E0B",
-      rgb: "245, 158, 11",
-      badge: "warning",
-    },
-    flagged: {
-      tailwind: "bg-red-500 text-white",
-      hex: "#EF4444",
-      rgb: "239, 68, 68",
-      badge: "danger",
-    },
+export function getVerdictStyle(verdict) {
+  const styles = {
+    verified: { bg: 'bg-emerald-500', text: 'text-white', hex: '#10B981' },
+    review:   { bg: 'bg-yellow-500',  text: 'text-white', hex: '#F59E0B' },
+    flagged:  { bg: 'bg-red-500',     text: 'text-white', hex: '#EF4444' },
   };
-
-  return colors[verdict] || colors.flagged;
+  return styles[verdict] ?? styles.flagged;
 }
 
 /**
- * Get verdict message for user display
- * @param {string} verdict - Trust verdict
- * @returns {Object} Title, message, and suggestion
+ * Returns a human-readable message for the worker's result screen.
+ *
+ * @param {'verified'|'review'|'flagged'} verdict
+ * @returns {{ title: string, message: string }}
  */
 export function getVerdictMessage(verdict) {
   const messages = {
     verified: {
-      title: "Verification Successful ✓",
-      message: "Your identity has been confirmed. You can now proceed with payments.",
-      suggestion: "Your account is approved for fund transfers.",
-      icon: "CheckCircle",
+      title:   'Verification Successful ✓',
+      message: 'Your identity has been confirmed. Your salary will be processed.',
     },
     review: {
-      title: "Verification Pending ⚠",
-      message: "Your verification requires manual review. We'll contact you within 24 hours.",
-      suggestion: "You may proceed with limited transactions while review is ongoing.",
-      icon: "AlertCircle",
+      title:   'Verification Pending ⚠',
+      message: 'Your verification requires manual review. HR will contact you within 24 hours.',
     },
     flagged: {
-      title: "Verification Failed ✗",
-      message: "Your verification could not be completed. Please try again or contact support.",
-      suggestion: "If you believe this is an error, contact support@payguard.ai",
-      icon: "XCircle",
+      title:   'Verification Failed ✗',
+      message: 'Verification could not be completed. Please contact your HR department.',
     },
   };
-
-  return messages[verdict] || messages.flagged;
+  return messages[verdict] ?? messages.flagged;
 }
 
 /**
- * Calculate progress percentage for verification
- * @param {Object} data - Verification data collected so far
- * @returns {number} Progress 0-100
+ * Returns the verification progress percentage (0–100) based on
+ * how many steps of the session have been completed.
+ *
+ * @param {{ livenessScore?: number, faceMatchScore?: number }} data
+ * @returns {number}
  */
 export function calculateVerificationProgress(data) {
   let progress = 0;
-
-  if (data.livenessScore !== undefined && data.livenessScore > 0) progress += 25;
-  if (data.facematchScore !== undefined && data.facematchScore > 0) progress += 25;
-  if (data.challengesPassed !== undefined && data.challengesPassed > 0) progress += 25;
-  if (data.accountNameMatch) progress += 25;
-
+  if ((data.livenessScore ?? 0) > 0)  progress += 50;
+  if ((data.faceMatchScore ?? 0) > 0) progress += 50;
   return Math.min(progress, 100);
 }
 
-/**
- * Format trust score for UI display
- * @param {number} score - Score 0-100
- * @returns {string} Formatted score with percentage
- */
-export function formatTrustScore(score) {
-  return `${Math.round(score)}%`;
-}
-
-/**
- * Validate trust score data before submission
- * @param {Object} data - Verification data
- * @returns {Object} Validation result with errors
- */
-export function validateTrustScoreData(data) {
-  const errors = [];
-
-  if (data.livenessScore < 0 || data.livenessScore > 100) {
-    errors.push("Liveness score must be between 0-100");
-  }
-
-  if (data.facematchScore < 0 || data.facematchScore > 100) {
-    errors.push("Face match score must be between 0-100");
-  }
-
-  if (data.challengesPassed < 0 || data.challengesTotal < 1) {
-    errors.push("Challenge data is invalid");
-  }
-
-  if (data.challengesPassed > data.challengesTotal) {
-    errors.push("Challenges passed cannot exceed total challenges");
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors,
-  };
-}
-
 export default {
-  calculateClientTrustScore,
-  getVerdictColors,
+  calculateTrustScore,
+  getVerdictStyle,
   getVerdictMessage,
   calculateVerificationProgress,
-  formatTrustScore,
-  validateTrustScoreData,
+  VERDICT_THRESHOLDS,
 };

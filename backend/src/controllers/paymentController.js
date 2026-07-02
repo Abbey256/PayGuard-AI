@@ -231,25 +231,238 @@ async function processPayment(req, res, next) {
   }
 }
 
+/**
+ * POST /api/payments/batches
+ *
+ * Creates a new payment batch for the authenticated admin's organisation.
+ * Collects all staff with status = 'verified', computes totals, and inserts
+ * both the batch record and the payment_batch_staff join rows.
+ *
+ * Body: { batchName?: string }
+ *
+ * Response:
+ *   201  { success: true, batch }   — batch created
+ *   400  { message }                — no verified staff found
+ *   404  { message }                — organisation not found
+ */
 async function createPaymentBatch(req, res, next) {
   try {
-    res.json({ success: true, message: "Create payment batch endpoint ready for implementation" });
+    const userId = req.user?.id;
+    const { batchName } = req.body;
+
+    // 1. Resolve organisation for this admin
+    const { data: org, error: orgError } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('admin_id', userId)
+      .single();
+
+    if (orgError || !org) {
+      return res.status(404).json({ success: false, message: 'Organisation not found for this account.' });
+    }
+
+    // 2. Fetch all verified staff in this organisation
+    const { data: verifiedStaff, error: staffError } = await supabase
+      .from('staff')
+      .select('id, salary')
+      .eq('organization_id', org.id)
+      .eq('status', 'verified');
+
+    if (staffError) throw staffError;
+
+    if (!verifiedStaff || verifiedStaff.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No verified staff found. Staff must complete biometric verification before a batch can be created.',
+      });
+    }
+
+    const totalAmount = verifiedStaff.reduce((sum, s) => sum + (s.salary || 0), 0);
+    const monthLabel  = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+    const name        = batchName || `${monthLabel} Payroll`;
+
+    // 3. Create the batch record
+    const { data: batch, error: batchError } = await supabase
+      .from('payment_batches')
+      .insert({
+        organization_id: org.id,
+        batch_name:      name,
+        staff_count:     verifiedStaff.length,
+        total_amount:    totalAmount,
+        status:          'pending',
+        created_by:      userId,
+      })
+      .select()
+      .single();
+
+    if (batchError) throw batchError;
+
+    // 4. Insert join rows (payment_batch_staff)
+    const joinRows = verifiedStaff.map(s => ({ batch_id: batch.id, staff_id: s.id }));
+    const { error: joinError } = await supabase
+      .from('payment_batch_staff')
+      .insert(joinRows);
+
+    if (joinError) throw joinError;
+
+    // 5. Audit log
+    await supabase.from('audit_logs').insert({
+      user_id:     userId,
+      action:      'PAYMENT_BATCH_CREATED',
+      entity_type: 'payment_batches',
+      entity_id:   batch.id,
+      changes:     { staff_count: verifiedStaff.length, total_amount: totalAmount },
+    });
+
+    return res.status(201).json({ success: true, batch });
   } catch (error) {
     next(error);
   }
 }
 
+/**
+ * POST /api/payments/batches/:id/approve
+ *
+ * Marks a pending payment batch as approved so it can be processed.
+ * Only the organisation's admin can approve their own batch.
+ *
+ * Response:
+ *   200  { success: true, batch }   — approved
+ *   400  { message }                — batch not in pending state
+ *   403  { message }                — batch belongs to a different organisation
+ *   404  { message }                — batch not found
+ */
 async function approveBatch(req, res, next) {
   try {
-    res.json({ success: true, message: "Approve batch endpoint ready for implementation" });
+    const userId  = req.user?.id;
+    const batchId = req.params.id;
+
+    // 1. Fetch the batch to validate ownership and state
+    const { data: batch, error: fetchError } = await supabase
+      .from('payment_batches')
+      .select('id, status, organization_id, total_amount, staff_count')
+      .eq('id', batchId)
+      .single();
+
+    if (fetchError || !batch) {
+      return res.status(404).json({ success: false, message: 'Payment batch not found.' });
+    }
+
+    // 2. Confirm the requesting admin owns this organisation
+    const { data: org, error: orgError } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('id', batch.organization_id)
+      .eq('admin_id', userId)
+      .single();
+
+    if (orgError || !org) {
+      return res.status(403).json({ success: false, message: 'You are not authorised to approve this batch.' });
+    }
+
+    // 3. Only pending batches can be approved
+    if (batch.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Batch is already "${batch.status}" — only pending batches can be approved.`,
+      });
+    }
+
+    // 4. Update status to approved
+    const { data: updated, error: updateError } = await supabase
+      .from('payment_batches')
+      .update({ status: 'approved', approved_at: new Date().toISOString(), approved_by: userId })
+      .eq('id', batchId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // 5. Audit log
+    await supabase.from('audit_logs').insert({
+      user_id:     userId,
+      action:      'PAYMENT_BATCH_APPROVED',
+      entity_type: 'payment_batches',
+      entity_id:   batchId,
+      changes:     {
+        total_amount: batch.total_amount,
+        staff_count:  batch.staff_count,
+      },
+    });
+
+    return res.json({ success: true, batch: updated });
   } catch (error) {
     next(error);
   }
 }
 
+/**
+ * GET /api/payments/status/:id
+ *
+ * Returns the current status, summary, and per-staff payment records
+ * for a given batch. Used by the frontend to show real-time payment state.
+ *
+ * Response:
+ *   200  { success: true, batch, records }
+ *   403  { message }  — batch belongs to a different organisation
+ *   404  { message }  — batch not found
+ */
 async function getPaymentStatus(req, res, next) {
   try {
-    res.json({ success: true, message: "Get payment status endpoint ready for implementation" });
+    const userId  = req.user?.id;
+    const batchId = req.params.id;
+
+    // 1. Fetch batch with join
+    const { data: batch, error: batchError } = await supabase
+      .from('payment_batches')
+      .select(`
+        id, batch_name, status, staff_count, total_amount,
+        total_paid, total_amount_disbursed,
+        created_at, processed_at,
+        organization_id
+      `)
+      .eq('id', batchId)
+      .single();
+
+    if (batchError || !batch) {
+      return res.status(404).json({ success: false, message: 'Batch not found.' });
+    }
+
+    // 2. Ownership check
+    const { data: org } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('id', batch.organization_id)
+      .eq('admin_id', userId)
+      .single();
+
+    if (!org) {
+      return res.status(403).json({ success: false, message: 'Not authorised to view this batch.' });
+    }
+
+    // 3. Fetch per-staff payment records
+    const { data: records, error: recordsError } = await supabase
+      .from('payment_records')
+      .select(`
+        id, amount, status, error_message, paid_at,
+        staff ( id, first_name, last_name, employee_id, bank_account, bank_code )
+      `)
+      .eq('batch_id', batchId)
+      .order('paid_at', { ascending: false });
+
+    if (recordsError) throw recordsError;
+
+    return res.json({
+      success: true,
+      batch,
+      records: records ?? [],
+      summary: {
+        total:   batch.staff_count,
+        paid:    (records ?? []).filter(r => r.status === 'success').length,
+        failed:  (records ?? []).filter(r => r.status === 'failed').length,
+        pending: batch.staff_count - (records ?? []).length,
+      },
+    });
   } catch (error) {
     next(error);
   }

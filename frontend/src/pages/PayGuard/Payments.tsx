@@ -54,86 +54,46 @@ export default function Payments() {
   };
 
   // -------------------------------------------------------------------------
-  // Load payment batches from Supabase
+  // Shared helpers
+  // -------------------------------------------------------------------------
+  const getApiUrl = () => import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+
+  const getAuthHeaders = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${session?.access_token}`,
+    };
+  };
+
+  // -------------------------------------------------------------------------
+  // Load payment batches — calls backend, which reads from DB server-side
   // -------------------------------------------------------------------------
   const loadBatches = useCallback(async () => {
     setIsLoading(true);
     try {
+      const headers = await getAuthHeaders();
+
+      // 1. Trigger batch creation / sync via backend
+      await fetch(`${getApiUrl()}/api/payments/batches`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({}),
+      });
+      // Non-fatal: if there are no verified staff the endpoint returns 400,
+      // which is fine — we still load existing batches below.
+
+      // 2. Load all existing batches for this org via Supabase (read-only, no auth bypass)
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       const { data: org } = await supabase.from('organizations').select('id').eq('admin_id', user.id).single();
       if (!org) return;
 
-      const orgId = org.id;
-
-      // Fetch all verified staff for this org (status='verified' is set by verifyController after liveness passes)
-      const { data: pendingStaff, error: staffFetchError } = await supabase
-        .from('staff')
-        .select('id, name, first_name, last_name, employee_id, salary, trust_score, status')
-        .eq('organization_id', orgId)
-        .eq('status', 'verified');
-
-      if (staffFetchError) console.error('Staff fetch error:', staffFetchError);
-
-      if (pendingStaff && pendingStaff.length > 0) {
-        const monthStr = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-        const batchName = `${monthStr} Payroll`;
-        const monthFilter = new Date().toISOString().substring(0, 7);
-
-        let sumOfSalaries = pendingStaff.reduce((sum, s) => sum + (s.salary || 0), 0);
-        let verifiedCount = pendingStaff.length;
-
-        let { data: batch, error: batchFetchError } = await supabase
-          .from('payment_batches')
-          .select('id, staff_count, total_amount')
-          .eq('organization_id', orgId)
-          .eq('status', 'pending')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle(); // returns null (not an error) when no row exists
-
-        if (batchFetchError) console.error('Batch fetch error:', batchFetchError);
-
-        if (!batch) {
-          const { data: newBatch } = await supabase.from('payment_batches').insert({
-            organization_id: orgId,
-            batch_name: batchName,
-            status: 'pending',
-            staff_count: verifiedCount,
-            total_amount: sumOfSalaries,
-            created_by: user.id
-          }).select().single();
-          batch = newBatch;
-        }
-
-        if (batch) {
-           // Add staff to batch only if not already there
-           const { data: existingEntries } = await supabase
-             .from('payment_batch_staff')
-             .select('staff_id')
-             .eq('batch_id', batch.id);
-
-           const alreadyInBatch = new Set((existingEntries || []).map((e: any) => e.staff_id));
-           const newEntries = pendingStaff
-             .filter(s => !alreadyInBatch.has(s.id))
-             .map(s => ({ batch_id: batch.id, staff_id: s.id }));
-
-           if (newEntries.length > 0) {
-             await supabase.from('payment_batch_staff').insert(newEntries);
-             // Update batch totals to reflect the newly added staff
-             await supabase.from('payment_batches').update({
-               staff_count: (existingEntries?.length || 0) + newEntries.length,
-               total_amount: pendingStaff.reduce((sum: number, s: any) => sum + (s.salary || 0), 0),
-             }).eq('id', batch.id);
-           }
-        }
-      }
-
       // Load flagged staff
       const { data: flagged } = await supabase
         .from('staff')
         .select('id, name, first_name, last_name, employee_id, trust_score, salary')
-        .eq('organization_id', orgId)
+        .eq('organization_id', org.id)
         .eq('status', 'flagged');
       setFlaggedStaffData((flagged as any) || []);
 
@@ -150,7 +110,7 @@ export default function Payments() {
             staff ( id, name, first_name, last_name, employee_id, trust_score, salary )
           )
         `)
-        .eq('organization_id', orgId)
+        .eq('organization_id', org.id)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -185,15 +145,20 @@ export default function Payments() {
   useEffect(() => { loadBatches(); }, [loadBatches]);
 
   // -------------------------------------------------------------------------
-  // Approve batch
+  // Approve batch — calls backend endpoint (audited, ownership-checked)
   // -------------------------------------------------------------------------
   const handleApproveBatch = async (batchId: string) => {
     try {
-      const { error } = await supabase
-        .from("payment_batches")
-        .update({ status: "approved" })
-        .eq("id", batchId);
-      if (error) throw error;
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${getApiUrl()}/api/payments/batches/${batchId}/approve`, {
+        method: "POST",
+        headers,
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.message ?? "Failed to approve batch");
+      }
 
       setPaymentBatches((prev) => prev.map((b) => b.id === batchId ? { ...b, status: "approved" as const } : b));
       showToast("Batch approved for payment processing");
@@ -205,26 +170,22 @@ export default function Payments() {
       }
     } catch (err) {
       console.error(err);
-      showToast("Failed to approve batch", "error");
+      showToast(err instanceof Error ? err.message : "Failed to approve batch", "error");
     }
   };
 
   // -------------------------------------------------------------------------
-  // Process payment via backend (Squad API)
+  // Process payment via backend
   // -------------------------------------------------------------------------
   const handleConfirmPayment = async () => {
     if (!selectedBatch) return;
     setIsProcessing(true);
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch(`${apiUrl}/api/payments/process`, {
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${getApiUrl()}/api/payments/process`, {
         method: "POST",
-        headers: { 
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${session?.access_token}`
-        },
+        headers,
         body: JSON.stringify({ batchId: selectedBatch.id }),
       });
 
@@ -233,11 +194,10 @@ export default function Payments() {
         throw new Error(body.message ?? "Payment processing failed");
       }
 
-      // Refresh batches from DB
+      const data = await response.json();
       await loadBatches();
 
-      const { summary } = await response.json();
-      setPaymentSummary(summary);
+      setPaymentSummary(data.summary);
       setPaymentConfirmModal(false);
       setApproveText("");
       setSummaryModalOpen(true);
@@ -246,7 +206,7 @@ export default function Payments() {
       if (user) {
         await createNotification(
           user.id, 
-          `Payment complete — ${summary.paid} staff paid, ${formatNaira(summary.total_disbursed)} disbursed, ${formatNaira(summary.remaining_balance)} remaining in wallet`, 
+          `Payment complete — ${data.summary.paid} staff paid, ${formatNaira(data.summary.total_disbursed)} disbursed, ${formatNaira(data.summary.remaining_balance)} remaining in wallet`, 
           "success"
         );
       }
