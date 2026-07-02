@@ -397,12 +397,12 @@ export async function submitVerification(req, res, next) {
         .from("payment_batches")
         .select("id, staff_count, total_amount")
         .eq("organization_id", orgId)
-        .eq("status", "pending")
+        .in("status", ["draft", "pending"])
         .order("created_at", { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
-      if (batchError && batchError.code !== "PGRST116") {
+      if (batchError) {
         console.error("Error fetching payment batch:", batchError);
       }
 
@@ -417,7 +417,7 @@ export async function submitVerification(req, res, next) {
             batch_name:      batchName,
             staff_count:     0,
             total_amount:    0,
-            status:          "pending",
+            status:          "draft",
             created_by:      orgData?.admin_id,
           })
           .select().single();

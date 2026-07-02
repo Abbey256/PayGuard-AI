@@ -283,7 +283,7 @@ async function createPaymentBatch(req, res, next) {
       .from('payment_batches')
       .select('id, staff_count, total_amount')
       .eq('organization_id', org.id)
-      .eq('status', 'pending')
+      .in('status', ['draft', 'pending'])
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -324,7 +324,7 @@ async function createPaymentBatch(req, res, next) {
           batch_name:      name,
           staff_count:     verifiedStaff.length,
           total_amount:    totalAmount,
-          status:          'pending',
+          status:          'draft',
           created_by:      userId,
         })
         .select()
@@ -396,10 +396,10 @@ async function approveBatch(req, res, next) {
     }
 
     // 3. Only pending batches can be approved
-    if (batch.status !== 'pending') {
+    if (!['draft', 'pending'].includes(batch.status)) {
       return res.status(400).json({
         success: false,
-        message: `Batch is already "${batch.status}" — only pending batches can be approved.`,
+        message: `Batch is already "${batch.status}" — only draft or pending batches can be approved.`,
       });
     }
 

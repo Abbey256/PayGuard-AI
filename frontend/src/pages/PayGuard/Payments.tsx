@@ -224,6 +224,7 @@ export default function Payments() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
+      case "draft":
       case "pending": return "text-amber-600 bg-amber-100";
       case "approved": return "text-blue-600 bg-blue-100";
       case "processed": return "text-emerald-600 bg-emerald-100";
@@ -233,7 +234,7 @@ export default function Payments() {
   };
 
   // Dynamic calculations from real data
-  const pendingAmount = paymentBatches.filter((b) => b.status === "pending").reduce((s, b) => s + b.total_amount, 0);
+  const pendingAmount = paymentBatches.filter((b) => b.status === "pending" || b.status === "draft").reduce((s, b) => s + b.total_amount, 0);
   const approvedAmount = paymentBatches.filter((b) => b.status === "approved").reduce((s, b) => s + b.total_amount, 0);
   const processedAmount = paymentBatches.filter((b) => b.status === "processed").reduce((s, b) => s + b.total_amount, 0);
   const totalStaff = paymentBatches.reduce((s, b) => s + b.staff_count, 0);
@@ -315,7 +316,7 @@ export default function Payments() {
                             className="text-blue-600 hover:text-blue-700 text-sm font-medium">
                             Review
                           </button>
-                          {batch.status === "pending" && (
+                          {(batch.status === "pending" || batch.status === "draft") && (
                             <button onClick={() => handleApproveBatch(batch.id)}
                               className="text-emerald-600 hover:text-emerald-700 text-sm font-medium">
                               Approve
