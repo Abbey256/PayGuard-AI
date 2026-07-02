@@ -277,33 +277,71 @@ async function createPaymentBatch(req, res, next) {
       });
     }
 
-    const totalAmount = verifiedStaff.reduce((sum, s) => sum + (s.salary || 0), 0);
+    // 3. Find existing pending batch for this org this month, or create new one
     const monthLabel  = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
     const name        = batchName || `${monthLabel} Payroll`;
 
-    // 3. Create the batch record
-    const { data: batch, error: batchError } = await supabase
+    // Check for existing pending batch to avoid duplicates
+    const { data: existingBatch } = await supabase
       .from('payment_batches')
-      .insert({
-        organization_id: org.id,
-        batch_name:      name,
-        staff_count:     verifiedStaff.length,
-        total_amount:    totalAmount,
-        status:          'pending',
-        created_by:      userId,
-      })
-      .select()
+      .select('id, staff_count, total_amount')
+      .eq('organization_id', org.id)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1)
       .single();
 
-    if (batchError) throw batchError;
+    let batch;
+    if (existingBatch) {
+      // Update existing batch with latest verified staff totals
+      const { data: updated, error: updateError } = await supabase
+        .from('payment_batches')
+        .update({
+          staff_count:  verifiedStaff.length,
+          total_amount: totalAmount,
+        })
+        .eq('id', existingBatch.id)
+        .select()
+        .single();
+      if (updateError) throw updateError;
+      batch = updated;
 
-    // 4. Insert join rows (payment_batch_staff)
-    const joinRows = verifiedStaff.map(s => ({ batch_id: batch.id, staff_id: s.id }));
-    const { error: joinError } = await supabase
-      .from('payment_batch_staff')
-      .insert(joinRows);
+      // Sync payment_batch_staff — add any new verified staff not yet in batch
+      const { data: existing } = await supabase
+        .from('payment_batch_staff')
+        .select('staff_id')
+        .eq('batch_id', batch.id);
+      const existingIds = new Set((existing ?? []).map((r: any) => r.staff_id));
+      const newRows = verifiedStaff
+        .filter(s => !existingIds.has(s.id))
+        .map(s => ({ batch_id: batch.id, staff_id: s.id }));
+      if (newRows.length > 0) {
+        await supabase.from('payment_batch_staff').insert(newRows);
+      }
+    } else {
+      // Create fresh batch
+      const { data: newBatch, error: batchError } = await supabase
+        .from('payment_batches')
+        .insert({
+          organization_id: org.id,
+          batch_name:      name,
+          staff_count:     verifiedStaff.length,
+          total_amount:    totalAmount,
+          status:          'pending',
+          created_by:      userId,
+        })
+        .select()
+        .single();
+      if (batchError) throw batchError;
+      batch = newBatch;
 
-    if (joinError) throw joinError;
+      // Insert join rows
+      const joinRows = verifiedStaff.map(s => ({ batch_id: batch.id, staff_id: s.id }));
+      const { error: joinError } = await supabase
+        .from('payment_batch_staff')
+        .insert(joinRows);
+      if (joinError) throw joinError;
+    }
 
     // 5. Audit log
     await supabase.from('audit_logs').insert({

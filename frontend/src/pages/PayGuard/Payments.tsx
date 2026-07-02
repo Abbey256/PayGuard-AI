@@ -67,27 +67,29 @@ export default function Payments() {
   };
 
   // -------------------------------------------------------------------------
-  // Load payment batches — calls backend, which reads from DB server-side
+  // Load payment batches — reads from DB directly, syncs batch in background
   // -------------------------------------------------------------------------
   const loadBatches = useCallback(async () => {
     setIsLoading(true);
     try {
-      const headers = await getAuthHeaders();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-      // 1. Trigger batch creation / sync via backend
-      await fetch(`${getApiUrl()}/api/payments/batches`, {
+      const { data: org } = await supabase
+        .from('organizations')
+        .select('id')
+        .eq('admin_id', user.id)
+        .single();
+      if (!org) return;
+
+      // Background sync — create/update batch with latest verified staff
+      // Non-fatal: if no verified staff, endpoint returns 400 which is fine
+      const headers = await getAuthHeaders();
+      fetch(`${getApiUrl()}/api/payments/batches`, {
         method: "POST",
         headers,
         body: JSON.stringify({}),
-      });
-      // Non-fatal: if there are no verified staff the endpoint returns 400,
-      // which is fine — we still load existing batches below.
-
-      // 2. Load all existing batches for this org via Supabase (read-only, no auth bypass)
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data: org } = await supabase.from('organizations').select('id').eq('admin_id', user.id).single();
-      if (!org) return;
+      }).catch(() => {}); // fire and forget
 
       // Load flagged staff
       const { data: flagged } = await supabase
@@ -97,6 +99,7 @@ export default function Payments() {
         .eq('status', 'flagged');
       setFlaggedStaffData((flagged as any) || []);
 
+      // Load all batches with staff details
       const { data, error } = await supabase
         .from("payment_batches")
         .select(`
@@ -122,13 +125,14 @@ export default function Payments() {
         total_amount: b.total_amount,
         created_at: b.created_at,
         status: b.status,
+        verification_rate: b.staff_count > 0 ? 100 : 0, // all staff in batch are verified
         verified_staff: (b.payment_batch_staff ?? [])
           .map((r: any) => {
-             if (r.staff) {
-               const name = r.staff.name || `${r.staff.first_name || ''} ${r.staff.last_name || ''}`.trim();
-               return { ...r.staff, name };
-             }
-             return null;
+            if (r.staff) {
+              const name = r.staff.name || `${r.staff.first_name || ''} ${r.staff.last_name || ''}`.trim();
+              return { ...r.staff, name };
+            }
+            return null;
           })
           .filter(Boolean),
       }));
