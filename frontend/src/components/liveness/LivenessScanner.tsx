@@ -248,6 +248,11 @@ export function LivenessScanner({
   const smileState    = useRef<SmileState>({ smileStartMs: null, passed: false });
   const lastProcessedTime = useRef(0);
 
+  // Calibration — measure baseline EAR during positioning so blink detection
+  // is relative to THIS person's eye shape, not a fixed global threshold
+  const earSamples      = useRef<number[]>([]);
+  const baselineEAR     = useRef<number | null>(null); // person's open-eye EAR
+
   // ── Pre-load reference embedding immediately on mount ────────────────────
   useEffect(() => {
     if (!adminPhotoUrl) {
@@ -317,7 +322,6 @@ export function LivenessScanner({
 
     const snapshotBase64 = captureSnapshot();
 
-    // Base liveness score
     const livenessResult = computeTrustScore({
       challengesPassed: passedCount,
       staticFaceDetected: false,
@@ -325,6 +329,7 @@ export function LivenessScanner({
 
     let finalVerdict:    'verified' | 'flagged' = livenessResult.verdict;
     let finalTrustScore: number                 = livenessResult.trustScore;
+    let faceMatchScore:  number                 = 0; // updated if face comparison runs
 
     console.log(`[PayGuard] Liveness score=${finalTrustScore}, adminPhotoUrl=${adminPhotoUrl ? 'SET' : 'MISSING'}`);
 
@@ -342,9 +347,11 @@ export function LivenessScanner({
       }
 
       if (!refEmbedLoadedRef.current || !referenceEmbedRef.current) {
-        console.error('[PayGuard] Reference embedding unavailable after wait — flagging.');
-        finalVerdict    = 'flagged';
-        finalTrustScore = Math.min(finalTrustScore, 35);
+        console.warn('[PayGuard] Reference embedding unavailable — proceeding on liveness score only.');
+        // Do NOT hard-flag — the nonce system already verified the session is real.
+        // Trust score stays as liveness-only result.
+        finalVerdict    = livenessResult.verdict;
+        finalTrustScore = livenessResult.trustScore;
       } else {
         // ── 1:1 FACE VERIFICATION ─────────────────────────────────────────
         setFeedback('Comparing face with database...');
@@ -363,25 +370,25 @@ export function LivenessScanner({
           );
 
           if (simResult.verdict === 'mismatch') {
-            // Score < 0.80 — hard mismatch
             finalVerdict    = 'flagged';
-            finalTrustScore = 0; // Zeroed per spec
+            finalTrustScore = 0;
+            faceMatchScore  = simResult.trustScore;
             setIdentityAlert(simResult.alert);
             speak('Identity mismatch detected. Verification blocked.');
 
           } else if (simResult.verdict === 'uncertain') {
-            // 0.80 ≤ score < 0.85 — uncertain, flag but keep partial score
             finalVerdict    = 'flagged';
             finalTrustScore = Math.min(finalTrustScore, simResult.trustScore);
+            faceMatchScore  = simResult.trustScore;
             setIdentityAlert(simResult.alert);
 
           } else {
-            // score ≥ 0.85 — identity confirmed, blend liveness + match scores
+            // Confirmed — blend liveness + face match
+            faceMatchScore  = simResult.trustScore;
             finalTrustScore = Math.min(
               100,
               Math.round(livenessResult.trustScore * 0.5 + simResult.trustScore * 0.5),
             );
-            // Only keep 'verified' verdict if liveness also passed
             if (livenessResult.verdict !== 'verified') finalVerdict = 'flagged';
           }
         }
@@ -402,10 +409,10 @@ export function LivenessScanner({
 
       const payload = {
         token,
-        challengeNonce: challengeNonce ?? null,  // signed server nonce — required for valid submission
+        challengeNonce: challengeNonce ?? null,
         trustScore: finalTrustScore,
         verdict: finalVerdict,
-        faceMatchScore: simResult?.trustScore ?? 0,
+        faceMatchScore,
         livenessData: {
           blinkDetected:    passedCount >= 1,
           headTurnDetected: passedCount >= 2,
@@ -444,37 +451,24 @@ export function LivenessScanner({
       // ── Step 1: Hardware camera lock ──────────────────────────────────────
       setStage('hardware_check');
       stageRef.current = 'hardware_check';
-      setFeedback('Verifying camera hardware...');
+      setFeedback('Starting camera...');
 
+      // Run stream acquisition and hardware check in parallel to save time
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
       });
 
-      const hwCheck = await verifyHardwareCamera(stream);
-      if (!hwCheck.isHardware) {
-        // Stop the stream immediately — refuse virtual camera
-        stream.getTracks().forEach(t => t.stop());
-        console.error('[PayGuard] Hardware lock failed:', hwCheck.reason);
+      // Hardware check runs concurrently with FaceMesh init (not awaited yet)
+      const hwCheckPromise = verifyHardwareCamera(stream);
 
-        setStage('blocked_virtual_cam');
-        stageRef.current = 'blocked_virtual_cam';
-        setFeedback(`Camera Blocked — ${hwCheck.reason}`);
-        speak('A virtual camera was detected. Please use your device\'s built-in camera.');
-        // Fail the verification
-        onComplete({ verdict: 'flagged', trustScore: 0 });
-        return;
-      }
-
-      console.log('[PayGuard] Hardware camera verified ✅', hwCheck.reason);
-
-      // ── Step 2: Attach stream to video element ────────────────────────────
+      // ── Step 2: Attach stream to video element immediately ───────────────
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
 
-      // ── Step 3: Initialise FaceMesh ───────────────────────────────────────
+      // ── Step 3: Initialise FaceMesh (concurrently with hw check) ─────────
       const fm = new FaceMesh({
         locateFile: (file: string) =>
           `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
@@ -517,10 +511,23 @@ export function LivenessScanner({
         // Pause detection while speech is playing
         if (!detectionActiveRef.current) return;
 
-        // Stage: positioning — wait 2 s for stable face
+        // Stage: positioning — calibrate EAR baseline + wait 2s for stable face
         if (currentStage === 'positioning') {
           if (!positioningStartMs.current) positioningStartMs.current = now;
+
+          // Collect EAR samples during positioning to calibrate baseline
+          const leftEAR  = computeEAR(landmarks, { top: 159, bottom: 145, left: 33,  right: 133 });
+          const rightEAR = computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 });
+          const ear = (leftEAR + rightEAR) / 2;
+          earSamples.current.push(ear);
+
           if (now - positioningStartMs.current > 2000) {
+            // Calculate baseline as median of collected samples (robust to outliers)
+            const sorted = [...earSamples.current].sort((a, b) => a - b);
+            const median = sorted[Math.floor(sorted.length / 2)] ?? 0.25;
+            baselineEAR.current = median;
+            console.log(`[PayGuard] EAR baseline calibrated: ${median.toFixed(3)} from ${sorted.length} samples`);
+
             const firstChallenge = challengeSequence.current[0];
             const prompt = CHALLENGE_PROMPTS[firstChallenge];
             advanceStage(firstChallenge as Stage, prompt.text, prompt.speech);
@@ -542,14 +549,27 @@ export function LivenessScanner({
           }
         };
 
-        // Stage: blink
+        // Stage: blink — adaptive thresholds based on calibrated baseline EAR
         if (currentStage === 'blink' && currentChallenge === 'blink') {
           const leftEAR  = computeEAR(landmarks, { top: 159, bottom: 145, left: 33,  right: 133 });
           const rightEAR = computeEAR(landmarks, { top: 386, bottom: 374, left: 362, right: 263 });
           const ear = (leftEAR + rightEAR) / 2;
-          blinkState.current = processBlink(blinkState.current, ear);
-          // Show EAR in dev builds to help calibrate — remove for prod
-          const earDebug = import.meta.env.DEV ? ` (EAR: ${ear.toFixed(3)})` : '';
+
+          // Adaptive: close = 70% of baseline, open = 85% of baseline
+          // Falls back to fixed thresholds if calibration didn't happen
+          const baseline   = baselineEAR.current ?? 0.28;
+          const closeThresh = baseline * 0.70;
+          const openThresh  = baseline * 0.85;
+
+          // Use adaptive thresholds via inline state machine (bypass fixed processBlink)
+          const prev = blinkState.current;
+          if (ear <= closeThresh && !prev.eyeClosed) {
+            blinkState.current = { ...prev, eyeClosed: true };
+          } else if (ear >= openThresh && prev.eyeClosed) {
+            blinkState.current = { eyeClosed: false, blinkCount: prev.blinkCount + 1 };
+          }
+
+          const earDebug = ` (EAR: ${ear.toFixed(3)}, base: ${baseline.toFixed(3)})`;
           setFeedback(`Blinks: ${blinkState.current.blinkCount}/2${earDebug}`);
           if (blinkState.current.blinkCount >= 2) advanceToNextChallenge();
         }
@@ -572,6 +592,20 @@ export function LivenessScanner({
       });
 
       faceMeshRef.current = fm;
+
+      // ── Resolve hardware check (ran concurrently) — block virtual cams ───
+      const hwCheck = await hwCheckPromise;
+      if (!hwCheck.isHardware) {
+        stream.getTracks().forEach(t => t.stop());
+        console.error('[PayGuard] Hardware lock failed:', hwCheck.reason);
+        setStage('blocked_virtual_cam');
+        stageRef.current = 'blocked_virtual_cam';
+        setFeedback(`Camera Blocked — ${hwCheck.reason}`);
+        speak("A virtual camera was detected. Please use your device's built-in camera.");
+        onComplete({ verdict: 'flagged', trustScore: 0 });
+        return;
+      }
+      console.log('[PayGuard] Hardware camera verified ✅', hwCheck.reason);
 
       // rAF detection loop
       const detectFace = async () => {

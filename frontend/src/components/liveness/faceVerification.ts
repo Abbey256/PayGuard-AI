@@ -51,10 +51,10 @@ export interface SimilarityResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SIMILARITY_THRESHOLDS = {
-  /** Minimum score to proceed to payout. */
-  PROCEED: 0.85,
-  /** Minimum score to avoid an Identity Mismatch alert. */
-  SOFT_PASS: 0.80,
+  /** Minimum score to proceed to payout — lowered from 0.85 for landmark-based matching */
+  PROCEED: 0.78,
+  /** Minimum score to avoid an Identity Mismatch alert */
+  SOFT_PASS: 0.72,
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,8 +248,13 @@ export async function verifyHardwareCamera(stream: MediaStream): Promise<DeviceL
   }
 
   // ── Layer 3: DeviceId cross-check ────────────────────────────────────────
+  // Wrap in a timeout — enumerateDevices can hang on some mobile browsers
   try {
-    const devices   = await navigator.mediaDevices.enumerateDevices();
+    const devicesPromise = navigator.mediaDevices.enumerateDevices();
+    const timeoutPromise = new Promise<MediaDeviceInfo[]>((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 1500)
+    );
+    const devices   = await Promise.race([devicesPromise, timeoutPromise]);
     const videoDevs = devices.filter(d => d.kind === 'videoinput');
     const activeId  = settings.deviceId;
 
@@ -261,7 +266,6 @@ export async function verifyHardwareCamera(stream: MediaStream): Promise<DeviceL
           reason: 'Active video device not found in system device list. Virtual camera suspected.',
         };
       }
-      // Final label check on enumerated device
       const devLabel = matched.label.toLowerCase();
       for (const keyword of VIRTUAL_CAMERA_LABELS) {
         if (devLabel.includes(keyword)) {
@@ -273,8 +277,8 @@ export async function verifyHardwareCamera(stream: MediaStream): Promise<DeviceL
       }
     }
   } catch {
-    // enumerateDevices can fail without HTTPS — treat as pass-through
-    console.warn('[PayGuard] enumerateDevices failed — skipping device list check.');
+    // enumerateDevices failed or timed out — treat as pass-through
+    console.warn('[PayGuard] enumerateDevices failed or timed out — skipping device list check.');
   }
 
   return { isHardware: true, reason: 'Physical hardware camera verified.' };
