@@ -112,17 +112,27 @@ async function processPayment(req, res, next) {
       const { bank_code, bank_account, salary, id: staffId, first_name, last_name } = staff;
       const staffName = `${first_name} ${last_name}`;
 
-      const lookupResult = await verifyAccountName(bank_code, bank_account);
+      const lookupResult = await verifyAccountName(bank_account, bank_code);
       
       let passedNameCheck = false;
-      let accountName = "Unknown";
-      
+      let accountName = `${first_name} ${last_name}`; // fallback to staff name
+
+      // In sandbox mode Squad returns 404 for real bank accounts — skip name check
+      const isSandbox = (process.env.SQUAD_SECRET_KEY || "").toLowerCase().includes("sandbox");
+
       if (lookupResult.success && lookupResult.data) {
-        accountName = lookupResult.data.account_name;
+        accountName = lookupResult.data.accountName || lookupResult.data.account_name || accountName;
         const returnedNameLower = accountName.toLowerCase();
-        if (returnedNameLower.includes(first_name.toLowerCase()) || returnedNameLower.includes(last_name.toLowerCase())) {
+        if (
+          returnedNameLower.includes(first_name.toLowerCase()) ||
+          returnedNameLower.includes(last_name.toLowerCase())
+        ) {
           passedNameCheck = true;
         }
+      } else if (isSandbox) {
+        // Sandbox: Squad can't verify real accounts — bypass name check for testing
+        console.log(`[PayGuard] Sandbox mode — bypassing name check for ${first_name} ${last_name}`);
+        passedNameCheck = true;
       }
 
       if (!passedNameCheck) {
