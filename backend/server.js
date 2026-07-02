@@ -2,8 +2,13 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import path from "path";
+import { fileURLToPath } from "url";
 import { generalLimiter } from "./src/middleware/rateLimiter.js";
 import { errorHandler } from "./src/middleware/errorHandler.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Routes
 import organizationRoutes from "./src/routes/organizations.js";
@@ -16,7 +21,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ── Security middleware ──────────────────────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // allow React app assets to load
+}));
 
 // Trust proxy — required when deployed behind a reverse proxy (Railway, Render, etc.)
 // Fixes: ERR_ERL_UNEXPECTED_X_FORWARDED_FOR from express-rate-limit
@@ -52,7 +59,16 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ── 404 ────────────────────────────────────────────────────────────────────────
+// ── Serve React frontend (production) ────────────────────────────────────────
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
+
+// React Router fallback — serve index.html for any non-API route
+app.get(/^(?!\/api|\/health).*/, (req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
+});
+
+// ── 404 for unmatched API routes ───────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });

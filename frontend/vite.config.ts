@@ -15,6 +15,10 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    outDir: "../backend/public",
+    emptyOutDir: true,
+  },
   server: {
     host: true, // Exposes dev server to local network (for phone testing)
     port: 5173,
