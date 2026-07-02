@@ -311,7 +311,7 @@ async function createPaymentBatch(req, res, next) {
         .from('payment_batch_staff')
         .select('staff_id')
         .eq('batch_id', batch.id);
-      const existingIds = new Set((existing ?? []).map((r: any) => r.staff_id));
+      const existingIds = new Set((existing ?? []).map((r) => r.staff_id));
       const newRows = verifiedStaff
         .filter(s => !existingIds.has(s.id))
         .map(s => ({ batch_id: batch.id, staff_id: s.id }));
