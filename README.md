@@ -425,24 +425,57 @@ All tables have **Row Level Security (RLS)** — admins only access their own or
 
 ---
 
-## 🗺️ Roadmap
+## 📋 Implementation Roadmap
 
-| Feature | Status |
-|---------|--------|
-| Core biometric verification flow | ✅ Done |
-| HMAC anti-bypass nonce system | ✅ Done |
-| Squad payment disbursement | ✅ Done |
-| Adaptive EAR calibration (per-person blink) | ✅ Done |
-| Randomised challenge order (crypto.getRandomValues) | ✅ Done |
-| AWS Rekognition server-side face verification | 🔧 S3 bucket ready, wiring pending |
-| NIN / BVN verification (NIMC/NIBSS API) | 📋 Planned for production |
-| BVN/bank account encryption (pgcrypto / Supabase Vault) | 📋 NDPR compliance |
-| Redis nonce store (multi-instance support) | 📋 Planned |
-| Switch to Squad live keys | 📋 On approval |
-| Full AWS serverless migration (Lambda + API Gateway) | 🗺️ Architecture designed |
+### Phase 1 — Hackathon MVP *(Current)*
+> **Target:** Tech-forward government offices (HQ/Abuja-based)
+
+- ✅ Browser-based biometric verification (MediaPipe FaceMesh)
+- ✅ HMAC-signed nonce system — API bypass prevention
+- ✅ Squad API payment routing with identity guard
+- ✅ Real-time HR dashboard with audit trails
+- ✅ Single Render deployment — fully live and testable
+
+### Phase 2 — Last-Mile Access *(3–6 months)*
+> **Target:** Ministries with mixed connectivity and varied device access
+
+- 🔧 **AWS Rekognition** — server-side face verification (S3 bucket ready)
+- 📱 **SMS-based worker notification** — lower data requirement than email links
+- 🤝 **Hybrid Agent Model** — government office staff assist low-digital-literacy workers
+- 💡 **Agent dashboard** — simplified UI for verification agents at LGA offices
+- 🔐 **NIN/BVN verification** — NIMC/NIBSS API for government ID matching
+- 🔒 **BVN/account encryption** — pgcrypto / Supabase Vault (NDPR compliance)
+
+### Phase 3 — Pilot & Scale *(6–12 months)*
+> **Target:** Local government council pilot (2–3 councils to start)
+
+- 📟 **USSD option** — feature phone support for unbanked/non-smartphone workers
+- 🏛️ **State payroll system integration** — IPPIS and state-level equivalents
+- 📊 **Analytics dashboard** — ghost worker detection patterns, savings reports
+- 🔄 **Redis nonce store** — multi-instance support for scale
+- ☁️ **Full AWS migration** — Lambda + API Gateway + RDS (architecture already designed)
+
+### Known Challenges & Honest Solutions
+
+| Challenge | V1 Reality | V2 Plan |
+|-----------|-----------|---------|
+| Poor connectivity | Requires stable internet + camera | SMS code + agent-assisted verification |
+| Device access | Worker needs a smartphone | Verification agent has the device |
+| Digital literacy | Fully self-service | Agent-guided + voice instructions |
+| Trust in AI | Tech-only decision | Human + AI oversight with HR override |
+| BVN/account security | Stored as plaintext (flagged, known gap) | pgcrypto envelope encryption |
+| Face match accuracy | Browser cosine similarity (lighting-dependent) | AWS Rekognition (99%+ server-side) |
 
 ---
 
+> *"We can't solve all problems now... there will always be challenges and we will refine till we get it right."*
+>
+> V1 works. V2 is planned. The ghost workers are already on notice.
+
+
+
+| Feature | Status |
+|---------|--------|
 ## 🔏 Privacy
 
 - No video frames leave the device — ever
