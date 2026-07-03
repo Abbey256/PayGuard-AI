@@ -48,10 +48,18 @@ export default function Reports() {
   const loadReports = useCallback(async () => {
     setIsLoading(true);
     try {
-      // Load audit logs
+      // Resolve current user's org first
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: org } = await supabase.from("organizations").select("id").eq("admin_id", user.id).single();
+      if (!org) return;
+      const orgId = org.id;
+
+      // Load audit logs scoped to this org's entities
       const { data: logs, error: logsError } = await supabase
         .from("audit_logs")
         .select("id, created_at, action, actor, target_staff, details, severity")
+        .eq("user_id", user.id)          // only logs from this admin
         .gte("created_at", dateFrom)
         .lte("created_at", dateTo + "T23:59:59")
         .order("created_at", { ascending: false })
@@ -60,17 +68,23 @@ export default function Reports() {
       if (logsError) throw logsError;
       setAuditLogs(logs ?? []);
 
-      // Compute metrics from verification_requests + staff tables
+      // Metrics — all scoped to this org
+      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+
       const [verifyResp, ghostResp, paymentsResp] = await Promise.all([
+        // Verifications for this org's staff only
         supabase
           .from("verification_requests")
           .select("status")
-          .gte("created_at", new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()),
-        supabase.from("staff").select("id").eq("status", "flagged"),
-        supabase
-          .from("payment_batches")
-          .select("total_amount")
-          .eq("status", "processed"),
+          .in(
+            "staff_id",
+            (await supabase.from("staff").select("id").eq("organization_id", orgId)).data?.map(s => s.id) ?? []
+          )
+          .gte("created_at", monthStart),
+        // Flagged staff in this org
+        supabase.from("staff").select("id").eq("organization_id", orgId).eq("status", "flagged"),
+        // Processed batches for this org
+        supabase.from("payment_batches").select("total_amount").eq("organization_id", orgId).eq("status", "processed"),
       ]);
 
       const verifications = verifyResp.data ?? [];
