@@ -54,17 +54,38 @@ export default function Staff() {
   const [isSendingLink, setIsSendingLink] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
+  const [orgId, setOrgId] = useState<string | null>(null);
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [addForm, setAddForm] = useState({
+    first_name: "", last_name: "", email: "", employee_id: "",
+    department: "", salary: "", phone: "", bank_account: "", bank_code: "", bvn: "",
+  });
+  const [isAdding, setIsAdding] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // -------------------------------------------------------------------------
-  // Load staff from Supabase
+  // Load staff from Supabase — scoped to current user's organisation
   // -------------------------------------------------------------------------
   const loadStaff = useCallback(async () => {
     setIsLoading(true);
     try {
+      // Resolve org for this user first
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: org } = await supabase
+        .from("organizations")
+        .select("id")
+        .eq("admin_id", user.id)
+        .single();
+
+      if (!org) { setStaffData([]); return; }
+      setOrgId(org.id);
+
       const { data, error } = await supabase
         .from("staff")
         .select("*")
+        .eq("organization_id", org.id)   // explicit org filter
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -105,6 +126,44 @@ export default function Staff() {
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3000);
+  };
+
+  // -------------------------------------------------------------------------
+  // Manual add staff
+  // -------------------------------------------------------------------------
+  const handleAddStaff = async () => {
+    if (!orgId) { showToast("Organisation not loaded", "error"); return; }
+    if (!addForm.first_name || !addForm.last_name || !addForm.email || !addForm.salary) {
+      showToast("First name, last name, email and salary are required", "error");
+      return;
+    }
+    setIsAdding(true);
+    try {
+      const { error } = await supabase.from("staff").insert({
+        organization_id: orgId,
+        first_name:   addForm.first_name.trim(),
+        last_name:    addForm.last_name.trim(),
+        name:         `${addForm.first_name.trim()} ${addForm.last_name.trim()}`,
+        email:        addForm.email.trim().toLowerCase(),
+        employee_id:  addForm.employee_id.trim() || `EMP-${Date.now()}`,
+        department:   addForm.department.trim(),
+        salary:       parseFloat(addForm.salary) || 0,
+        phone:        addForm.phone.trim(),
+        bank_account: addForm.bank_account.trim(),
+        bank_code:    addForm.bank_code.trim(),
+        bvn:          addForm.bvn.trim() || null,
+        status:       "pending",
+      });
+      if (error) throw error;
+      showToast(`${addForm.first_name} ${addForm.last_name} added successfully`);
+      setAddModalOpen(false);
+      setAddForm({ first_name:"", last_name:"", email:"", employee_id:"", department:"", salary:"", phone:"", bank_account:"", bank_code:"", bvn:"" });
+      await loadStaff();
+    } catch (err: any) {
+      showToast(err?.message || "Failed to add staff", "error");
+    } finally {
+      setIsAdding(false);
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -359,6 +418,12 @@ export default function Staff() {
                   Refresh
                 </button>
                 <button
+                  onClick={() => setAddModalOpen(true)}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 transition flex items-center gap-2"
+                >
+                  + Add Staff
+                </button>
+                <button
                   onClick={handleDownloadTemplate}
                   className="rounded-lg border border-emerald-600 px-4 py-2 text-emerald-600 hover:bg-emerald-50 transition flex items-center gap-2"
                 >
@@ -521,9 +586,73 @@ export default function Staff() {
         </div>
       </div>
 
+      {/* Add Staff Modal */}
+      {addModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-lg bg-white dark:bg-gray-900 shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-6 py-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Add Staff Member</h3>
+              <button onClick={() => setAddModalOpen(false)} className="text-gray-500 hover:text-gray-700">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="px-6 py-4 max-h-[70vh] overflow-y-auto space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                {[
+                  { key: "first_name", label: "First Name *", placeholder: "Adewale" },
+                  { key: "last_name",  label: "Last Name *",  placeholder: "Okafor" },
+                ].map(({ key, label, placeholder }) => (
+                  <div key={key}>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{label}</label>
+                    <input
+                      type="text"
+                      placeholder={placeholder}
+                      value={(addForm as any)[key]}
+                      onChange={e => setAddForm(f => ({ ...f, [key]: e.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-white focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+              {[
+                { key: "email",       label: "Email *",          placeholder: "adewale@ministry.gov.ng", type: "email" },
+                { key: "employee_id", label: "Employee ID",       placeholder: "EMP001" },
+                { key: "department",  label: "Department",        placeholder: "Finance" },
+                { key: "salary",      label: "Salary (₦) *",      placeholder: "180000", type: "number" },
+                { key: "phone",       label: "Phone",             placeholder: "08012345678" },
+                { key: "bank_account",label: "Bank Account No",   placeholder: "0123456789" },
+                { key: "bank_code",   label: "Bank Code",         placeholder: "057 (Zenith), 058 (GTB), 033 (UBA)" },
+                { key: "bvn",         label: "BVN (optional)",    placeholder: "12345678901" },
+              ].map(({ key, label, placeholder, type = "text" }) => (
+                <div key={key}>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{label}</label>
+                  <input
+                    type={type}
+                    placeholder={placeholder}
+                    value={(addForm as any)[key]}
+                    onChange={e => setAddForm(f => ({ ...f, [key]: e.target.value }))}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-3 border-t border-gray-200 dark:border-gray-700 px-6 py-4">
+              <button onClick={() => setAddModalOpen(false)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 transition text-sm">
+                Cancel
+              </button>
+              <button onClick={handleAddStaff} disabled={isAdding}
+                className="rounded-lg bg-emerald-600 px-6 py-2 text-white hover:bg-emerald-700 disabled:opacity-50 transition text-sm flex items-center gap-2">
+                {isAdding && <Loader size={14} className="animate-spin" />}
+                {isAdding ? "Adding..." : "Add Staff"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Slide-over Panel */}
-      {isSlideOverOpen && selectedStaff && (
-        <StaffEditPanel
+      {isSlideOverOpen && selectedStaff && (        <StaffEditPanel
           staff={selectedStaff}
           onClose={() => {
             setIsSlideOverOpen(false);
