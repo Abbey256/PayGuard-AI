@@ -4,9 +4,8 @@ import { setupOrganization, getMyOrganization } from "../controllers/organizatio
 
 const router = Router();
 
-// Public — called right after Supabase signUp (no auth token yet at that moment,
-// so we keep setup public but validate adminId in the controller)
-router.post("/setup", setupOrganization);
+// Protected — adminId extracted from JWT, not from request body
+router.post("/setup", authMiddleware, setupOrganization);
 
 // Protected — get current org details (including squad sub account id)
 router.get("/me", authMiddleware, getMyOrganization);

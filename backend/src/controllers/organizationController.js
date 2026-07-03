@@ -13,10 +13,16 @@ import { createSubAccount, createVirtualAccount } from "../services/squadService
  */
 export async function setupOrganization(req, res, next) {
   try {
-    const { orgId, orgName, adminId, email = "org@example.com", phone = "08000000000", settlementBank = "057", settlementAccount = "0000000000" } = req.body;
+    // adminId comes from the verified JWT — not from request body
+    const adminId = req.user?.id;
+    if (!adminId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
 
-    if (!orgId || !orgName || !adminId) {
-      return res.status(400).json({ success: false, message: "orgId, orgName, and adminId are required" });
+    const { orgId, orgName, email = "org@example.com", phone = "08000000000", settlementBank = "057", settlementAccount = "0000000000" } = req.body;
+
+    if (!orgId || !orgName) {
+      return res.status(400).json({ success: false, message: "orgId and orgName are required" });
     }
 
     // 1. Create Squad sub-account
