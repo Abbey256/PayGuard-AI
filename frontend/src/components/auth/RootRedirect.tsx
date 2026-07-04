@@ -14,7 +14,7 @@ export default function RootRedirect() {
         } = await supabase.auth.getUser();
 
         if (!user) {
-          if (mounted) navigate("/landing", { replace: true });
+          if (mounted) navigate("/", { replace: true });
           return;
         }
 

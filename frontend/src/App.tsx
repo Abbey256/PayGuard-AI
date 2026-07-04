@@ -32,7 +32,7 @@ export default function App() {
             {/* Dashboard Layout (authenticated) */}
             <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
               {/* PayGuard AI Pages */}
-              <Route path="/" element={<RootRedirect />} />
+              <Route path="/home" element={<RootRedirect />} />
               <Route path="/dashboard" element={<Home />} />
               <Route path="/staff" element={<Staff />} />
               <Route path="/verify" element={<Verification />} />
@@ -49,6 +49,9 @@ export default function App() {
             <Route path="/signup" element={<SignUp />} />
             <Route path="/landing" element={<LandingPage />} />
             <Route path="/pending-approval" element={<PendingApproval />} />
+
+            {/* Public landing page — no auth required */}
+            <Route path="/" element={<LandingPage />} />
 
             {/* Fallback Route */}
             <Route path="*" element={<NotFound />} />
