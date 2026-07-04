@@ -5,11 +5,24 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
-  ShieldCheck,
 } from "lucide-react";
 import { supabase } from "../../lib/supabaseClient";
 import Label from "../form/Label";
 import Input from "../form/input/InputField";
+
+// Password strength checker
+function getPasswordStrength(password: string): { score: number; label: string; color: string } {
+  if (!password) return { score: 0, label: "", color: "" };
+  let score = 0;
+  if (password.length >= 8)  score++;
+  if (password.length >= 12) score++;
+  if (/[A-Z]/.test(password)) score++;
+  if (/[0-9]/.test(password)) score++;
+  if (/[^A-Za-z0-9]/.test(password)) score++;
+  if (score <= 1) return { score, label: "Weak",   color: "bg-red-500" };
+  if (score <= 3) return { score, label: "Medium",  color: "bg-amber-500" };
+  return              { score, label: "Strong",  color: "bg-emerald-500" };
+}
 
 const nigerianStates = [
   "Abia",
@@ -157,14 +170,18 @@ export default function SignUpForm() {
 
       // 3. Call backend to create Squad sub-account silently (fire-and-not-block)
       if (orgData?.id) {
-        const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+        // Use same origin in production (Express serves frontend + backend together)
+        const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
+        const { data: { session } } = await supabase.auth.getSession();
         fetch(`${apiUrl}/api/organizations/setup`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${session?.access_token ?? ""}`,
+          },
           body: JSON.stringify({
             orgId: orgData.id,
             orgName: organizationName,
-            adminId: authUserId,
           }),
         }).catch((err) => console.warn("Squad setup (non-fatal):", err));
       }
@@ -261,6 +278,7 @@ export default function SignUpForm() {
               type="text"
               placeholder="Ministry of Finance"
               value={form.organizationName}
+              maxLength={100}
               onChange={(event) => updateField("organizationName", event.target.value)}
             />
           </div>
@@ -290,10 +308,17 @@ export default function SignUpForm() {
               <Input
                 id="phone-number"
                 name="phoneNumber"
-                type="text"
+                type="tel"
                 placeholder="08012345678"
                 value={form.phoneNumber}
-                onChange={(event) => updateField("phoneNumber", event.target.value)}
+                maxLength={11}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                onChange={(event) => {
+                  // Only allow digits
+                  const val = event.target.value.replace(/\D/g, "");
+                  updateField("phoneNumber", val);
+                }}
               />
             </div>
 
@@ -359,6 +384,23 @@ export default function SignUpForm() {
                 )}
               </button>
             </div>
+            {/* Password strength indicator */}
+            {form.password && (() => {
+              const strength = getPasswordStrength(form.password);
+              return (
+                <div className="mt-2">
+                  <div className="flex gap-1 mb-1">
+                    {[1,2,3,4,5].map(i => (
+                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${i <= strength.score ? strength.color : "bg-gray-200"}`} />
+                    ))}
+                  </div>
+                  <p className={`text-xs font-medium ${strength.score <= 1 ? "text-red-500" : strength.score <= 3 ? "text-amber-500" : "text-emerald-600"}`}>
+                    {strength.label} password
+                    {strength.score <= 1 && " — add uppercase, numbers and symbols"}
+                  </p>
+                </div>
+              );
+            })()}
           </div>
 
           <div>

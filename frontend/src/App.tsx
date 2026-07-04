@@ -16,6 +16,7 @@ import RootRedirect from "./components/auth/RootRedirect";
 import VerificationPage from "./pages/Verification/VerificationPage";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import PendingApproval from "./pages/AuthPages/PendingApproval";
+import LandingPage from "./pages/LandingPage";
 import { AuthProvider } from "./components/auth/AuthProvider";
 
 export default function App() {
@@ -46,6 +47,7 @@ export default function App() {
             <Route path="/signin" element={<SignIn />} />
             <Route path="/login" element={<SignIn />} />
             <Route path="/signup" element={<SignUp />} />
+            <Route path="/landing" element={<LandingPage />} />
             <Route path="/pending-approval" element={<PendingApproval />} />
 
             {/* Fallback Route */}
