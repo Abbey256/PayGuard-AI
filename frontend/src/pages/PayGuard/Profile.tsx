@@ -125,7 +125,7 @@ export default function Profile() {
   const loadTransactions = async () => {
     setIsLoadingTransactions(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
       const { data: { session } } = await supabase.auth.getSession();
       const response = await fetch(`${apiUrl}/api/payments/transactions`, {
         headers: { "Authorization": `Bearer ${session?.access_token}` },
@@ -151,7 +151,7 @@ export default function Profile() {
       if (error) throw new Error("Incorrect password. Access denied.");
 
       // Log the view to audit logs via backend
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
       const { data: { session } } = await supabase.auth.getSession();
       await fetch(`${apiUrl}/api/payments/log-balance-view`, {
         method: "POST",
@@ -184,7 +184,7 @@ export default function Profile() {
 
     setIsSimulatingFunding(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
       const { data: { session } } = await supabase.auth.getSession();
       
       const reason = fundingReason === "Custom" ? customReason : fundingReason;
@@ -260,14 +260,18 @@ export default function Profile() {
     if (!org || !admin) return;
     setIsRefreshing(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
+      const { data: { session } } = await supabase.auth.getSession();
+
       const response = await fetch(`${apiUrl}/api/organizations/setup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session?.access_token ?? ""}`,
+        },
         body: JSON.stringify({
           orgId: org.id,
           orgName: org.name,
-          adminId: admin.id,
           email: admin.email,
         }),
       });
@@ -281,7 +285,7 @@ export default function Profile() {
       }
     } catch (err) {
       console.error(err);
-      showToast("Provisioning failed. Ensure backend is running.", "error");
+      showToast("Provisioning failed. Please try again.", "error");
     } finally {
       setIsRefreshing(false);
     }
@@ -759,4 +763,5 @@ export default function Profile() {
     </>
   );
 }
+
 

@@ -56,7 +56,7 @@ export default function Payments() {
   // -------------------------------------------------------------------------
   // Shared helpers
   // -------------------------------------------------------------------------
-  const getApiUrl = () => import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+  const getApiUrl = () => import.meta.env.VITE_API_URL || window.location.origin;
 
   const getAuthHeaders = async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -545,3 +545,4 @@ export default function Payments() {
     </>
   );
 }
+

@@ -320,7 +320,7 @@ export default function Staff() {
     setIsSendingLink(true);
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+      const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
       const { data: { session } } = await supabase.auth.getSession();
       const response = await fetch(`${apiUrl}/api/verification/send`, {
         method: "POST",
@@ -952,3 +952,4 @@ function StaffEditPanel({
     </div>
   );
 }
+
