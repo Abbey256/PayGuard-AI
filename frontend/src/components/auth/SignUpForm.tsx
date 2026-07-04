@@ -168,9 +168,21 @@ export default function SignUpForm() {
         // Still proceed — org can be re-created if needed
       }
 
-      // 3. Call backend to create Squad sub-account silently (fire-and-not-block)
+      // 3. Sign in immediately to get a valid session token
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: officialEmail,
+        password: form.password,
+      });
+
+      if (signInError) {
+        // Account was created — just ask them to sign in manually
+        setSubmitted(true);
+        setForm(getResetFormState());
+        return;
+      }
+
+      // 4. Now we have a session — call backend to create Squad sub-account
       if (orgData?.id) {
-        // Use same origin in production (Express serves frontend + backend together)
         const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
         const { data: { session } } = await supabase.auth.getSession();
         fetch(`${apiUrl}/api/organizations/setup`, {
@@ -184,19 +196,6 @@ export default function SignUpForm() {
             orgName: organizationName,
           }),
         }).catch((err) => console.warn("Squad setup (non-fatal):", err));
-      }
-
-      // 4. Sign in immediately and go to dashboard
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: officialEmail,
-        password: form.password,
-      });
-
-      if (signInError) {
-        // Account was created — just ask them to sign in manually
-        setSubmitted(true);
-        setForm(getResetFormState());
-        return;
       }
 
       // 5. Redirect straight to dashboard
