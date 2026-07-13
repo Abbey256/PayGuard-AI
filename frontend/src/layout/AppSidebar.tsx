@@ -270,7 +270,7 @@ const AppSidebar: React.FC = () => {
           !isExpanded && !isHovered ? "lg:justify-center" : "justify-start"
         }`}
       >
-        <Link to="/" className="flex items-center gap-2">
+        <Link to="/dashboard" className="flex items-center gap-2">
           {isExpanded || isHovered || isMobileOpen ? (
             <img src="/logo.png" alt="PayGuard AI" className="h-8" />
           ) : (
@@ -306,3 +306,4 @@ const AppSidebar: React.FC = () => {
 };
 
 export default AppSidebar;
+

@@ -83,7 +83,7 @@ const AppHeader: React.FC = () => {
             {/* Cross Icon */}
           </button>
 
-          <Link to="/" className="lg:hidden flex items-center gap-2">
+          <Link to="/dashboard" className="lg:hidden flex items-center gap-2">
             <img src="/logo.png" alt="PayGuard AI" className="h-8" />
           </Link>
 
@@ -163,3 +163,4 @@ const AppHeader: React.FC = () => {
 };
 
 export default AppHeader;
+

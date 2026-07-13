@@ -418,7 +418,7 @@ export async function submitVerification(req, res, next) {
             staff_count:     0,
             total_amount:    0,
             status:          "draft",
-            created_by:      orgData?.admin_id,
+            created_by:      orgData?.admin_id ?? null,
           })
           .select().single();
 

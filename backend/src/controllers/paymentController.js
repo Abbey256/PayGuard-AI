@@ -273,7 +273,13 @@ async function createPaymentBatch(req, res, next) {
       .eq('organization_id', org.id)
       .eq('status', 'verified');
 
-    if (staffError) throw staffError;
+    if (staffError) {
+      console.error("Staff query error:", staffError);
+      return res.status(400).json({
+        success: false,
+        message: 'No verified staff found.',
+      });
+    }
 
     if (!verifiedStaff || verifiedStaff.length === 0) {
       return res.status(400).json({
@@ -335,19 +341,25 @@ async function createPaymentBatch(req, res, next) {
           staff_count:     verifiedStaff.length,
           total_amount:    totalAmount,
           status:          'draft',
-          created_by:      userId,
+          // created_by references public.users — use null if user not in that table
+          created_by:      userId ?? null,
         })
         .select()
         .single();
-      if (batchError) throw batchError;
+      if (batchError) {
+        console.error("Batch create error:", batchError);
+        return res.status(500).json({ success: false, message: batchError.message });
+      }
       batch = newBatch;
 
-      // Insert join rows
+      // Insert join rows — ignore duplicate errors
       const joinRows = verifiedStaff.map(s => ({ batch_id: batch.id, staff_id: s.id }));
       const { error: joinError } = await supabase
         .from('payment_batch_staff')
         .insert(joinRows);
-      if (joinError) throw joinError;
+      if (joinError && !joinError.message?.includes('duplicate')) {
+        console.error("Join insert error:", joinError);
+      }
     }
 
     // 5. Audit log
